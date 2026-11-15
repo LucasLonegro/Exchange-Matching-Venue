@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>io.lmb</groupId>
+    <artifactId>lmb-venue</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+  </parent>
+  <artifactId>lmb-controlplane</artifactId>
+  <name>LMB control plane: reference data, scheduler, risk-budget allocator</name>
+
+  <dependencies>
+    <dependency><groupId>io.lmb</groupId><artifactId>lmb-common</artifactId></dependency>
+    <dependency><groupId>io.javalin</groupId><artifactId>javalin</artifactId></dependency>
+    <dependency><groupId>com.zaxxer</groupId><artifactId>HikariCP</artifactId></dependency>
+    <dependency><groupId>org.postgresql</groupId><artifactId>postgresql</artifactId></dependency>
+    <dependency><groupId>com.h2database</groupId><artifactId>h2</artifactId></dependency>
+    <dependency><groupId>org.hdrhistogram</groupId><artifactId>HdrHistogram</artifactId></dependency>
+    <dependency><groupId>io.prometheus</groupId><artifactId>prometheus-metrics-core</artifactId></dependency>
+    <dependency><groupId>io.prometheus</groupId><artifactId>prometheus-metrics-exporter-httpserver</artifactId></dependency>
+    <dependency><groupId>io.lmb</groupId><artifactId>lmb-testkit</artifactId><scope>test</scope></dependency>
+  </dependencies>
+</project>

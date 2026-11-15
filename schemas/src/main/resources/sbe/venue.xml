@@ -1,0 +1,357 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
+                   package="io.lmb.sbe"
+                   id="1"
+                   version="1"
+                   semanticVersion="1.0"
+                   description="LMB venue: commands written to a shard's Raft log, and events derived from it"
+                   byteOrder="littleEndian">
+    <types>
+        <composite name="messageHeader" description="Standard SBE message header">
+            <type name="blockLength" primitiveType="uint16"/>
+            <type name="templateId" primitiveType="uint16"/>
+            <type name="schemaId" primitiveType="uint16"/>
+            <type name="version" primitiveType="uint16"/>
+        </composite>
+
+        <!-- First field of every event (templateId >= 100), always at body offset 0. -->
+        <composite name="EventHeader" description="Deterministic event identity: (shardId, logPosition, eventIdx) plus a dense per-shard eventSeq">
+            <type name="eventSeq" primitiveType="int64" description="Dense per-shard sequence, starts at 1, +1 per event"/>
+            <type name="logPosition" primitiveType="int64" description="Raft log position of the command or timer that caused this event"/>
+            <type name="timestampNs" primitiveType="int64" description="Cluster timestamp (epoch ns) of the causing log entry"/>
+            <type name="eventIdx" primitiveType="uint32" description="Index of this event among those caused by the same log entry, from 0"/>
+            <type name="shardId" primitiveType="uint16"/>
+            <type name="reserved" primitiveType="uint16"/>
+        </composite>
+
+        <type name="Price" primitiveType="int64" presence="optional" description="Integer cents. Null (Long.MIN_VALUE) means no price, e.g. market order"/>
+        <type name="Qty" primitiveType="int64" description="Shares"/>
+        <type name="Notional" primitiveType="int64" description="Cents"/>
+        <type name="Ticker" primitiveType="char" length="8" characterEncoding="US-ASCII"/>
+        <type name="Hash256" primitiveType="uint8" length="32"/>
+
+        <enum name="BooleanType" encodingType="uint8">
+            <validValue name="FALSE">0</validValue>
+            <validValue name="TRUE">1</validValue>
+        </enum>
+        <enum name="Side" encodingType="uint8">
+            <validValue name="BUY">1</validValue>
+            <validValue name="SELL">2</validValue>
+        </enum>
+        <enum name="OrdType" encodingType="uint8">
+            <validValue name="LIMIT">1</validValue>
+            <validValue name="MARKET">2</validValue>
+        </enum>
+        <enum name="TimeInForce" encodingType="uint8">
+            <validValue name="DAY">1</validValue>
+            <validValue name="IOC">2</validValue>
+        </enum>
+        <enum name="ExecType" encodingType="uint8">
+            <validValue name="NEW">1</validValue>
+            <validValue name="PARTIAL_FILL">2</validValue>
+            <validValue name="FILL">3</validValue>
+            <validValue name="CANCELED">4</validValue>
+            <validValue name="REPLACED">5</validValue>
+            <validValue name="REJECTED">6</validValue>
+            <validValue name="EXPIRED">7</validValue>
+            <validValue name="CANCEL_REJECTED">8</validValue>
+        </enum>
+        <enum name="OrdStatus" encodingType="uint8">
+            <validValue name="NEW">1</validValue>
+            <validValue name="PARTIALLY_FILLED">2</validValue>
+            <validValue name="FILLED">3</validValue>
+            <validValue name="CANCELED">4</validValue>
+            <validValue name="REJECTED">5</validValue>
+            <validValue name="EXPIRED">6</validValue>
+        </enum>
+        <enum name="RejectReason" encodingType="uint8">
+            <validValue name="NONE">0</validValue>
+            <validValue name="UNKNOWN_SYMBOL">1</validValue>
+            <validValue name="SYMBOL_HALTED">2</validValue>
+            <validValue name="SYMBOL_CLOSED">3</validValue>
+            <validValue name="INVALID_PRICE">4</validValue>
+            <validValue name="INVALID_QTY">5</validValue>
+            <validValue name="PRICE_BAND">6</validValue>
+            <validValue name="CREDIT_LIMIT">7</validValue>
+            <validValue name="POSITION_LIMIT">8</validValue>
+            <validValue name="DUPLICATE_CLORDID">9</validValue>
+            <validValue name="UNKNOWN_ORDER">10</validValue>
+            <validValue name="TOO_LATE_TO_CANCEL">11</validValue>
+            <validValue name="UNKNOWN_FIRM">12</validValue>
+            <validValue name="FIRM_DISABLED">13</validValue>
+            <validValue name="NO_LIQUIDITY">14</validValue>
+            <validValue name="MARKET_ORDER_NOT_ALLOWED">15</validValue>
+            <validValue name="INVALID_REPLACE">16</validValue>
+            <validValue name="NO_REFERENCE_PRICE">17</validValue>
+            <validValue name="INVALID_STATE_TRANSITION">18</validValue>
+            <validValue name="MALFORMED">19</validValue>
+            <validValue name="OTHER">99</validValue>
+        </enum>
+        <enum name="CancelReason" encodingType="uint8">
+            <validValue name="NONE">0</validValue>
+            <validValue name="CLIENT">1</validValue>
+            <validValue name="MASS_CANCEL">2</validValue>
+            <validValue name="DISCONNECT">3</validValue>
+            <validValue name="IOC_REMAINDER">4</validValue>
+            <validValue name="MARKET_COLLAR">5</validValue>
+            <validValue name="SYMBOL_REMOVED">6</validValue>
+            <validValue name="END_OF_DAY">7</validValue>
+            <validValue name="ADMIN">8</validValue>
+        </enum>
+        <enum name="SymbolState" encodingType="uint8">
+            <validValue name="PRE_OPEN">1</validValue>
+            <validValue name="AUCTION_CALL">2</validValue>
+            <validValue name="CONTINUOUS">3</validValue>
+            <validValue name="HALTED">4</validValue>
+            <validValue name="CLOSED">5</validValue>
+            <validValue name="REMOVED">6</validValue>
+        </enum>
+        <enum name="MassCancelScope" encodingType="uint8">
+            <validValue name="FIRM">1</validValue>
+            <validValue name="SESSION">2</validValue>
+            <validValue name="FIRM_SYMBOL">3</validValue>
+            <validValue name="GATEWAY">4</validValue>
+            <validValue name="SYMBOL">5</validValue>
+        </enum>
+        <enum name="LiquidityFlag" encodingType="uint8">
+            <validValue name="NONE">0</validValue>
+            <validValue name="MAKER">1</validValue>
+            <validValue name="TAKER">2</validValue>
+            <validValue name="AUCTION">3</validValue>
+        </enum>
+    </types>
+
+    <!-- ===================== COMMANDS (templateId 1..99): inputs to the Raft log ===================== -->
+
+    <sbe:message name="NewOrder" id="1" description="Order entry from a gateway">
+        <field name="sessionId" id="1" type="int64" description="Participant session identity, stable across gateway reconnects"/>
+        <field name="clOrdId" id="2" type="int64" description="Client order id, unique per firm per trading day"/>
+        <field name="price" id="3" type="Price"/>
+        <field name="quantity" id="4" type="Qty"/>
+        <field name="gatewayInTsNs" id="5" type="int64" description="Gateway receive time, audit and latency measurement only"/>
+        <field name="firmId" id="6" type="uint32"/>
+        <field name="accountId" id="7" type="uint32"/>
+        <field name="symbolId" id="8" type="uint32"/>
+        <field name="gatewayId" id="9" type="uint16"/>
+        <field name="side" id="10" type="Side"/>
+        <field name="ordType" id="11" type="OrdType"/>
+        <field name="timeInForce" id="12" type="TimeInForce"/>
+        <field name="possResend" id="13" type="BooleanType" description="TRUE when the gateway resubmits after a failover; duplicates are then dropped silently"/>
+    </sbe:message>
+
+    <sbe:message name="CancelOrder" id="2">
+        <field name="sessionId" id="1" type="int64"/>
+        <field name="clOrdId" id="2" type="int64" description="Id of this cancel request"/>
+        <field name="origClOrdId" id="3" type="int64" description="clOrdId of the order to cancel"/>
+        <field name="gatewayInTsNs" id="4" type="int64"/>
+        <field name="firmId" id="5" type="uint32"/>
+        <field name="symbolId" id="6" type="uint32"/>
+        <field name="gatewayId" id="7" type="uint16"/>
+        <field name="possResend" id="8" type="BooleanType"/>
+    </sbe:message>
+
+    <sbe:message name="ReplaceOrder" id="3" description="Amend. Quantity decrease at same price keeps priority; anything else loses it">
+        <field name="sessionId" id="1" type="int64"/>
+        <field name="clOrdId" id="2" type="int64" description="Id of this replace request; becomes the order's clOrdId on success"/>
+        <field name="origClOrdId" id="3" type="int64"/>
+        <field name="newPrice" id="4" type="Price"/>
+        <field name="newQuantity" id="5" type="Qty" description="New total order quantity (FIX OrderQty semantics); leaves = newQuantity - cumQty"/>
+        <field name="gatewayInTsNs" id="6" type="int64"/>
+        <field name="firmId" id="7" type="uint32"/>
+        <field name="symbolId" id="8" type="uint32"/>
+        <field name="gatewayId" id="9" type="uint16"/>
+        <field name="possResend" id="10" type="BooleanType"/>
+    </sbe:message>
+
+    <sbe:message name="MassCancel" id="4" description="Atomic within the shard. Gateways fan out one per shard">
+        <field name="requestId" id="1" type="int64" description="Correlation id echoed in MassCancelDone"/>
+        <field name="sessionId" id="2" type="int64"/>
+        <field name="gatewayInTsNs" id="3" type="int64"/>
+        <field name="firmId" id="4" type="uint32"/>
+        <field name="symbolId" id="5" type="uint32" description="Used by FIRM_SYMBOL and SYMBOL scopes"/>
+        <field name="gatewayId" id="6" type="uint16" description="Sender"/>
+        <field name="targetGatewayId" id="7" type="uint16" description="Used by GATEWAY scope"/>
+        <field name="scope" id="8" type="MassCancelScope"/>
+        <field name="reason" id="9" type="CancelReason" description="MASS_CANCEL, DISCONNECT or ADMIN"/>
+    </sbe:message>
+
+    <sbe:message name="ReferencePrice" id="10" description="From the NBBO consolidator. Applied only if sourceTsNs is newer than the last applied one for the symbol">
+        <field name="nbbBid" id="1" type="Price"/>
+        <field name="nbbOffer" id="2" type="Price"/>
+        <field name="referencePrice" id="3" type="Price" description="Centre of the price band"/>
+        <field name="sourceTsNs" id="4" type="int64"/>
+        <field name="symbolId" id="5" type="uint32"/>
+        <field name="sourceId" id="6" type="uint16" description="Consolidator instance"/>
+        <field name="venueCount" id="7" type="uint8" description="Venues contributing (non-stale)"/>
+    </sbe:message>
+
+    <sbe:message name="SymbolDefinition" id="11" description="Create or update a symbol on this shard">
+        <field name="correlationId" id="1" type="int64"/>
+        <field name="tickSize" id="2" type="int64" description="Cents"/>
+        <field name="lotSize" id="3" type="Qty"/>
+        <field name="referencePrice" id="4" type="Price"/>
+        <field name="maxOrderQty" id="5" type="Qty"/>
+        <field name="symbolId" id="6" type="uint32"/>
+        <field name="priceBandBps" id="7" type="uint32" description="Band half-width around the reference price, basis points"/>
+        <field name="ticker" id="8" type="Ticker"/>
+        <field name="initialState" id="9" type="SymbolState" description="Only used when the symbol is new"/>
+    </sbe:message>
+
+    <sbe:message name="SymbolStateCommand" id="12" description="Halts, pauses, auctions, open and close">
+        <field name="correlationId" id="1" type="int64"/>
+        <field name="effectiveTimeNs" id="2" type="int64" description="0 = now. Otherwise a cluster timer is scheduled and the transition applies when it fires"/>
+        <field name="symbolId" id="3" type="uint32" presence="optional" description="Null (0xFFFFFFFF) = every symbol on the shard"/>
+        <field name="reasonCode" id="4" type="uint16"/>
+        <field name="targetState" id="5" type="SymbolState"/>
+    </sbe:message>
+
+    <sbe:message name="RiskLimitUpdate" id="13" description="Per-shard slice of a firm's limits, set by the risk-budget allocator. Creates the firm if unknown">
+        <field name="correlationId" id="1" type="int64"/>
+        <field name="creditBudget" id="2" type="Notional"/>
+        <field name="maxPositionPerSymbol" id="3" type="Qty"/>
+        <field name="firmId" id="4" type="uint32"/>
+        <field name="enabled" id="5" type="BooleanType" description="FALSE = kill switch: new orders rejected, cancels still allowed"/>
+    </sbe:message>
+
+    <sbe:message name="DayRollover" id="14" description="Expires all orders, clears the clOrdId dedupe table and intraday risk usage">
+        <field name="correlationId" id="1" type="int64"/>
+        <field name="tradingDate" id="2" type="int32" description="yyyymmdd of the day that starts"/>
+    </sbe:message>
+
+    <!-- ===================== EVENTS (templateId 100..199): derived, deterministic ===================== -->
+
+    <sbe:message name="ExecutionReport" id="101">
+        <field name="eventHeader" id="1" type="EventHeader"/>
+        <field name="sessionId" id="2" type="int64"/>
+        <field name="orderId" id="3" type="int64" description="Venue order id; 0 when the order was never accepted"/>
+        <field name="clOrdId" id="4" type="int64"/>
+        <field name="origClOrdId" id="5" type="int64" description="0 unless cancel/replace"/>
+        <field name="matchId" id="6" type="int64" description="0 unless a fill; same value on both sides and on the Trade event"/>
+        <field name="price" id="7" type="Price" description="Order limit price"/>
+        <field name="orderQty" id="8" type="Qty"/>
+        <field name="lastQty" id="9" type="Qty"/>
+        <field name="lastPx" id="10" type="Price"/>
+        <field name="leavesQty" id="11" type="Qty"/>
+        <field name="cumQty" id="12" type="Qty"/>
+        <field name="gatewayInTsNs" id="13" type="int64" description="Echo of the triggering request's gatewayInTsNs when this party's request caused the event, else 0"/>
+        <field name="firmId" id="14" type="uint32"/>
+        <field name="accountId" id="15" type="uint32"/>
+        <field name="symbolId" id="16" type="uint32"/>
+        <field name="gatewayId" id="17" type="uint16" description="Gateway that entered the order"/>
+        <field name="execType" id="18" type="ExecType"/>
+        <field name="ordStatus" id="19" type="OrdStatus"/>
+        <field name="side" id="20" type="Side"/>
+        <field name="ordType" id="21" type="OrdType"/>
+        <field name="timeInForce" id="22" type="TimeInForce"/>
+        <field name="liquidity" id="23" type="LiquidityFlag"/>
+        <field name="rejectReason" id="24" type="RejectReason"/>
+        <field name="cancelReason" id="25" type="CancelReason"/>
+    </sbe:message>
+
+    <sbe:message name="Trade" id="102" description="One per match; public print and clearing record">
+        <field name="eventHeader" id="1" type="EventHeader"/>
+        <field name="matchId" id="2" type="int64"/>
+        <field name="price" id="3" type="Price"/>
+        <field name="quantity" id="4" type="Qty"/>
+        <field name="buyOrderId" id="5" type="int64"/>
+        <field name="sellOrderId" id="6" type="int64"/>
+        <field name="symbolId" id="7" type="uint32"/>
+        <field name="buyFirmId" id="8" type="uint32"/>
+        <field name="sellFirmId" id="9" type="uint32"/>
+        <field name="aggressorSide" id="10" type="Side" presence="optional" description="Null for auction trades"/>
+        <field name="isAuction" id="11" type="BooleanType"/>
+    </sbe:message>
+
+    <sbe:message name="BookDelta" id="103" description="Price-level change. quantity is the total resting at the level after the change; 0 removes the level">
+        <field name="eventHeader" id="1" type="EventHeader"/>
+        <field name="price" id="2" type="Price"/>
+        <field name="quantity" id="3" type="Qty"/>
+        <field name="symbolId" id="4" type="uint32"/>
+        <field name="orderCount" id="5" type="int32"/>
+        <field name="side" id="6" type="Side"/>
+    </sbe:message>
+
+    <sbe:message name="SymbolStateChanged" id="104">
+        <field name="eventHeader" id="1" type="EventHeader"/>
+        <field name="correlationId" id="2" type="int64"/>
+        <field name="symbolId" id="3" type="uint32"/>
+        <field name="reasonCode" id="4" type="uint16"/>
+        <field name="previousState" id="5" type="SymbolState"/>
+        <field name="newState" id="6" type="SymbolState"/>
+    </sbe:message>
+
+    <sbe:message name="AuctionUpdate" id="105" description="Indicative uncross during AUCTION_CALL (emitted when it changes) and the final result at uncross">
+        <field name="eventHeader" id="1" type="EventHeader"/>
+        <field name="price" id="2" type="Price" description="Null when the book does not cross"/>
+        <field name="matchedQuantity" id="3" type="Qty"/>
+        <field name="imbalanceQuantity" id="4" type="Qty"/>
+        <field name="symbolId" id="5" type="uint32"/>
+        <field name="imbalanceSide" id="6" type="Side" presence="optional"/>
+        <field name="isFinal" id="7" type="BooleanType"/>
+    </sbe:message>
+
+    <sbe:message name="ReferencePriceApplied" id="106">
+        <field name="eventHeader" id="1" type="EventHeader"/>
+        <field name="referencePrice" id="2" type="Price"/>
+        <field name="nbbBid" id="3" type="Price"/>
+        <field name="nbbOffer" id="4" type="Price"/>
+        <field name="bandLow" id="5" type="Price"/>
+        <field name="bandHigh" id="6" type="Price"/>
+        <field name="sourceTsNs" id="7" type="int64"/>
+        <field name="symbolId" id="8" type="uint32"/>
+    </sbe:message>
+
+    <sbe:message name="MassCancelDone" id="107">
+        <field name="eventHeader" id="1" type="EventHeader"/>
+        <field name="requestId" id="2" type="int64"/>
+        <field name="sessionId" id="3" type="int64"/>
+        <field name="firmId" id="4" type="uint32"/>
+        <field name="canceledCount" id="5" type="int32"/>
+        <field name="gatewayId" id="6" type="uint16"/>
+        <field name="scope" id="7" type="MassCancelScope"/>
+    </sbe:message>
+
+    <sbe:message name="RiskLimitApplied" id="108" description="Echo of a RiskLimitUpdate with the usage at that instant; the allocator uses it to rebalance">
+        <field name="eventHeader" id="1" type="EventHeader"/>
+        <field name="correlationId" id="2" type="int64"/>
+        <field name="creditBudget" id="3" type="Notional"/>
+        <field name="creditUsed" id="4" type="Notional"/>
+        <field name="maxPositionPerSymbol" id="5" type="Qty"/>
+        <field name="firmId" id="6" type="uint32"/>
+        <field name="enabled" id="7" type="BooleanType"/>
+    </sbe:message>
+
+    <sbe:message name="SymbolDefined" id="109">
+        <field name="eventHeader" id="1" type="EventHeader"/>
+        <field name="correlationId" id="2" type="int64"/>
+        <field name="tickSize" id="3" type="int64"/>
+        <field name="lotSize" id="4" type="Qty"/>
+        <field name="referencePrice" id="5" type="Price"/>
+        <field name="maxOrderQty" id="6" type="Qty"/>
+        <field name="symbolId" id="7" type="uint32"/>
+        <field name="priceBandBps" id="8" type="uint32"/>
+        <field name="ticker" id="9" type="Ticker"/>
+        <field name="state" id="10" type="SymbolState"/>
+    </sbe:message>
+
+    <sbe:message name="CommandRejected" id="110" description="A control command (templateId >= 10) or a malformed message was refused">
+        <field name="eventHeader" id="1" type="EventHeader"/>
+        <field name="correlationId" id="2" type="int64"/>
+        <field name="commandTemplateId" id="3" type="uint16"/>
+        <field name="rejectReason" id="4" type="RejectReason"/>
+    </sbe:message>
+
+    <sbe:message name="DayRolled" id="111">
+        <field name="eventHeader" id="1" type="EventHeader"/>
+        <field name="correlationId" id="2" type="int64"/>
+        <field name="tradingDate" id="3" type="int32"/>
+        <field name="expiredOrders" id="4" type="int32"/>
+    </sbe:message>
+
+    <sbe:message name="CommandApplied" id="120" description="Always the last event of a log entry. Marks the batch boundary and carries the hash chain">
+        <field name="eventHeader" id="1" type="EventHeader"/>
+        <field name="eventCount" id="2" type="uint32" description="Events emitted for this log entry, not counting this one"/>
+        <field name="commandTemplateId" id="3" type="uint16" description="0 for a timer"/>
+        <field name="chainHash" id="4" type="Hash256"/>
+    </sbe:message>
+</sbe:messageSchema>

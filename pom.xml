@@ -1,0 +1,159 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>io.lmb</groupId>
+  <artifactId>lmb-venue</artifactId>
+  <version>0.1.0-SNAPSHOT</version>
+  <packaging>pom</packaging>
+  <name>LMB trading venue</name>
+
+  <modules>
+    <module>schemas</module>
+    <module>api-proto</module>
+    <module>common</module>
+    <module>testkit</module>
+    <module>matcher-core</module>
+    <module>cluster-client</module>
+    <module>cluster-node</module>
+    <module>fix-codecs</module>
+    <module>gateway</module>
+    <module>marketdata</module>
+    <module>feeds</module>
+    <module>controlplane</module>
+    <module>posttrade</module>
+    <module>replayer</module>
+    <module>tools</module>
+    <module>dist</module>
+  </modules>
+
+  <properties>
+    <maven.compiler.release>21</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+
+    <aeron.version>1.54.2</aeron.version>
+    <agrona.version>2.7.1</agrona.version>
+    <sbe.version>1.42.0</sbe.version>
+    <artio.version>0.187</artio.version>
+    <grpc.version>1.85.1</grpc.version>
+    <protoc.version>3.25.9</protoc.version>
+    <hdrhistogram.version>2.2.2</hdrhistogram.version>
+    <prometheus.version>1.10.0</prometheus.version>
+    <slf4j.version>2.0.20</slf4j.version>
+    <logback.version>1.6.7</logback.version>
+    <junit.version>6.1.3</junit.version>
+    <kafka.version>4.4.0</kafka.version>
+    <postgresql.version>42.7.14</postgresql.version>
+    <h2.version>2.5.252</h2.version>
+    <hikari.version>7.1.0</hikari.version>
+    <javalin.version>7.2.4</javalin.version>
+    <awssdk.version>2.59.1</awssdk.version>
+    <clickhouse.version>0.11.2</clickhouse.version>
+
+    <!-- JVM flags Aeron/Agrona need on Java 21; reused by surefire and the launch scripts. -->
+    <lmb.jvm.opens>--add-opens java.base/jdk.internal.misc=ALL-UNNAMED --add-opens java.base/sun.nio.ch=ALL-UNNAMED --add-opens java.base/java.util.zip=ALL-UNNAMED</lmb.jvm.opens>
+    <lmb.test.heap>-Xmx512m</lmb.test.heap>
+  </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <!-- project modules -->
+      <dependency><groupId>io.lmb</groupId><artifactId>lmb-schemas</artifactId><version>${project.version}</version></dependency>
+      <dependency><groupId>io.lmb</groupId><artifactId>lmb-api-proto</artifactId><version>${project.version}</version></dependency>
+      <dependency><groupId>io.lmb</groupId><artifactId>lmb-common</artifactId><version>${project.version}</version></dependency>
+      <dependency><groupId>io.lmb</groupId><artifactId>lmb-testkit</artifactId><version>${project.version}</version></dependency>
+      <dependency><groupId>io.lmb</groupId><artifactId>lmb-matcher-core</artifactId><version>${project.version}</version></dependency>
+      <dependency><groupId>io.lmb</groupId><artifactId>lmb-cluster-client</artifactId><version>${project.version}</version></dependency>
+      <dependency><groupId>io.lmb</groupId><artifactId>lmb-cluster-node</artifactId><version>${project.version}</version></dependency>
+      <dependency><groupId>io.lmb</groupId><artifactId>lmb-fix-codecs</artifactId><version>${project.version}</version></dependency>
+      <dependency><groupId>io.lmb</groupId><artifactId>lmb-gateway</artifactId><version>${project.version}</version></dependency>
+      <dependency><groupId>io.lmb</groupId><artifactId>lmb-marketdata</artifactId><version>${project.version}</version></dependency>
+      <dependency><groupId>io.lmb</groupId><artifactId>lmb-feeds</artifactId><version>${project.version}</version></dependency>
+      <dependency><groupId>io.lmb</groupId><artifactId>lmb-controlplane</artifactId><version>${project.version}</version></dependency>
+      <dependency><groupId>io.lmb</groupId><artifactId>lmb-posttrade</artifactId><version>${project.version}</version></dependency>
+      <dependency><groupId>io.lmb</groupId><artifactId>lmb-replayer</artifactId><version>${project.version}</version></dependency>
+      <dependency><groupId>io.lmb</groupId><artifactId>lmb-tools</artifactId><version>${project.version}</version></dependency>
+
+      <!-- Aeron stack: individual artifacts, never aeron-all (it shades Agrona and clashes with Artio) -->
+      <dependency><groupId>io.aeron</groupId><artifactId>aeron-client</artifactId><version>${aeron.version}</version></dependency>
+      <dependency><groupId>io.aeron</groupId><artifactId>aeron-driver</artifactId><version>${aeron.version}</version></dependency>
+      <dependency><groupId>io.aeron</groupId><artifactId>aeron-archive</artifactId><version>${aeron.version}</version></dependency>
+      <dependency><groupId>io.aeron</groupId><artifactId>aeron-cluster</artifactId><version>${aeron.version}</version></dependency>
+      <dependency><groupId>io.aeron</groupId><artifactId>aeron-samples</artifactId><version>${aeron.version}</version></dependency>
+      <dependency><groupId>org.agrona</groupId><artifactId>agrona</artifactId><version>${agrona.version}</version></dependency>
+      <dependency><groupId>uk.co.real-logic</groupId><artifactId>sbe-tool</artifactId><version>${sbe.version}</version></dependency>
+      <dependency><groupId>uk.co.real-logic</groupId><artifactId>artio-core</artifactId><version>${artio.version}</version></dependency>
+      <dependency><groupId>uk.co.real-logic</groupId><artifactId>artio-codecs</artifactId><version>${artio.version}</version></dependency>
+      <dependency><groupId>uk.co.real-logic</groupId><artifactId>artio-session-codecs</artifactId><version>${artio.version}</version></dependency>
+
+      <!-- gRPC -->
+      <dependency><groupId>io.grpc</groupId><artifactId>grpc-bom</artifactId><version>${grpc.version}</version><type>pom</type><scope>import</scope></dependency>
+
+      <!-- observability -->
+      <dependency><groupId>org.hdrhistogram</groupId><artifactId>HdrHistogram</artifactId><version>${hdrhistogram.version}</version></dependency>
+      <dependency><groupId>io.prometheus</groupId><artifactId>prometheus-metrics-core</artifactId><version>${prometheus.version}</version></dependency>
+      <dependency><groupId>io.prometheus</groupId><artifactId>prometheus-metrics-exporter-httpserver</artifactId><version>${prometheus.version}</version></dependency>
+      <dependency><groupId>org.slf4j</groupId><artifactId>slf4j-api</artifactId><version>${slf4j.version}</version></dependency>
+      <dependency><groupId>ch.qos.logback</groupId><artifactId>logback-classic</artifactId><version>${logback.version}</version></dependency>
+
+      <!-- off-path infrastructure clients -->
+      <dependency><groupId>org.apache.kafka</groupId><artifactId>kafka-clients</artifactId><version>${kafka.version}</version></dependency>
+      <dependency><groupId>org.postgresql</groupId><artifactId>postgresql</artifactId><version>${postgresql.version}</version></dependency>
+      <dependency><groupId>com.h2database</groupId><artifactId>h2</artifactId><version>${h2.version}</version></dependency>
+      <dependency><groupId>com.zaxxer</groupId><artifactId>HikariCP</artifactId><version>${hikari.version}</version></dependency>
+      <dependency><groupId>io.javalin</groupId><artifactId>javalin</artifactId><version>${javalin.version}</version></dependency>
+      <dependency><groupId>software.amazon.awssdk</groupId><artifactId>s3</artifactId><version>${awssdk.version}</version></dependency>
+      <dependency><groupId>com.clickhouse</groupId><artifactId>clickhouse-jdbc</artifactId><version>${clickhouse.version}</version></dependency>
+
+      <!-- test -->
+      <dependency><groupId>org.junit</groupId><artifactId>junit-bom</artifactId><version>${junit.version}</version><type>pom</type><scope>import</scope></dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <!-- Every module gets logging API and JUnit. -->
+  <dependencies>
+    <dependency><groupId>org.slf4j</groupId><artifactId>slf4j-api</artifactId></dependency>
+    <dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId><scope>test</scope></dependency>
+    <dependency><groupId>org.junit.platform</groupId><artifactId>junit-platform-launcher</artifactId><scope>test</scope></dependency>
+    <dependency><groupId>ch.qos.logback</groupId><artifactId>logback-classic</artifactId><scope>test</scope></dependency>
+  </dependencies>
+
+  <build>
+    <pluginManagement>
+      <plugins>
+        <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-compiler-plugin</artifactId><version>3.15.0</version></plugin>
+        <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-resources-plugin</artifactId><version>3.4.0</version></plugin>
+        <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-jar-plugin</artifactId><version>3.5.0</version></plugin>
+        <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-install-plugin</artifactId><version>3.1.4</version></plugin>
+        <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-dependency-plugin</artifactId><version>3.10.0</version></plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-surefire-plugin</artifactId>
+          <version>3.6.0</version>
+          <configuration>
+            <argLine>${lmb.jvm.opens} ${lmb.test.heap}</argLine>
+            <forkCount>1</forkCount>
+            <reuseForks>true</reuseForks>
+            <trimStackTrace>false</trimStackTrace>
+          </configuration>
+        </plugin>
+        <plugin><groupId>org.codehaus.mojo</groupId><artifactId>build-helper-maven-plugin</artifactId><version>3.7.0</version></plugin>
+        <!--
+          SBE code generation. A module opts in by declaring exec-maven-plugin and
+          build-helper-maven-plugin in its <build><plugins> and setting the property
+          sbe.schema.file to its schema XML. Output: target/generated-sources/sbe.
+        -->
+        <plugin>
+          <groupId>org.codehaus.mojo</groupId>
+          <artifactId>exec-maven-plugin</artifactId>
+          <version>3.6.4</version>
+          <dependencies>
+            <dependency><groupId>uk.co.real-logic</groupId><artifactId>sbe-tool</artifactId><version>${sbe.version}</version></dependency>
+          </dependencies>
+        </plugin>
+      </plugins>
+    </pluginManagement>
+  </build>
+</project>
