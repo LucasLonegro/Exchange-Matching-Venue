@@ -1,0 +1,187 @@
+syntax = "proto3";
+
+package lmb.orderentry.v1;
+
+import "google/api/annotations.proto";
+
+option java_package = "io.lmb.proto.orderentry";
+option java_multiple_files = true;
+
+// Order entry runs on one long-lived bidirectional stream per participant session.
+// The channel is authenticated with mTLS (production) and Logon.api_key.
+// Both directions carry sequence numbers; either side can detect a gap and resume.
+service OrderEntry {
+  rpc Session(stream ClientMessage) returns (stream ServerMessage);
+}
+
+// Low-rate unary calls. Envoy transcodes these to REST.
+service OrderQuery {
+  rpc GetOrder(GetOrderRequest) returns (OrderState) {
+    option (google.api.http) = { get: "/v1/firms/{firm_id}/orders/{cl_ord_id}" };
+  }
+  rpc ListSymbols(ListSymbolsRequest) returns (ListSymbolsResponse) {
+    option (google.api.http) = { get: "/v1/symbols" };
+  }
+  rpc GetSessionStatus(SessionStatusRequest) returns (SessionStatus) {
+    option (google.api.http) = { get: "/v1/sessions/{session_id}" };
+  }
+}
+
+enum Side { SIDE_UNSPECIFIED = 0; BUY = 1; SELL = 2; }
+enum OrdType { ORD_TYPE_UNSPECIFIED = 0; LIMIT = 1; MARKET = 2; }
+enum TimeInForce { TIF_UNSPECIFIED = 0; DAY = 1; IOC = 2; }
+enum ExecType {
+  EXEC_TYPE_UNSPECIFIED = 0; EXEC_NEW = 1; EXEC_PARTIAL_FILL = 2; EXEC_FILL = 3; EXEC_CANCELED = 4;
+  EXEC_REPLACED = 5; EXEC_REJECTED = 6; EXEC_EXPIRED = 7; EXEC_CANCEL_REJECTED = 8;
+}
+enum OrdStatus {
+  ORD_STATUS_UNSPECIFIED = 0; STATUS_NEW = 1; STATUS_PARTIALLY_FILLED = 2; STATUS_FILLED = 3;
+  STATUS_CANCELED = 4; STATUS_REJECTED = 5; STATUS_EXPIRED = 6;
+}
+
+// Position in one shard's event stream. Execution reports are identified by (shard_id, event_seq).
+message ShardCursor {
+  uint32 shard_id = 1;
+  int64 event_seq = 2; // last event_seq the client has processed from this shard
+}
+
+message ClientMessage {
+  uint64 seq = 1; // client sequence number, starts at 1 after Logon, +1 per message (heartbeats excluded)
+  oneof body {
+    Logon logon = 2;
+    NewOrder new_order = 3;
+    CancelOrder cancel_order = 4;
+    ReplaceOrder replace_order = 5;
+    MassCancel mass_cancel = 6;
+    Heartbeat heartbeat = 7;
+  }
+}
+
+message Logon {
+  uint32 firm_id = 1;
+  int64 session_id = 2;                 // participant session identity, assigned by the venue
+  string api_key = 3;
+  bool cancel_on_disconnect = 4;
+  repeated ShardCursor resume_from = 5; // empty = only new events; otherwise replay everything after each cursor
+  uint64 next_seq = 6;                  // next client seq the client will send (1 on a fresh day)
+}
+
+message NewOrder {
+  int64 cl_ord_id = 1;       // unique per firm per trading day
+  string symbol = 2;         // ticker
+  Side side = 3;
+  OrdType type = 4;
+  TimeInForce tif = 5;
+  int64 quantity = 6;        // shares
+  int64 price_cents = 7;     // required for LIMIT, ignored for MARKET
+  uint32 account_id = 8;
+}
+
+message CancelOrder {
+  int64 cl_ord_id = 1;
+  int64 orig_cl_ord_id = 2;
+  string symbol = 3;
+}
+
+message ReplaceOrder {
+  int64 cl_ord_id = 1;
+  int64 orig_cl_ord_id = 2;
+  string symbol = 3;
+  int64 new_quantity = 4;    // new total order quantity
+  int64 new_price_cents = 5;
+}
+
+message MassCancel {
+  int64 request_id = 1;
+  string symbol = 2;         // empty = all symbols for the firm
+}
+
+message Heartbeat {}
+
+message ServerMessage {
+  uint64 seq = 1; // server sequence number for this stream, +1 per message (heartbeats excluded)
+  oneof body {
+    LogonAck logon_ack = 2;
+    ExecutionReport execution_report = 3;
+    MassCancelAck mass_cancel_ack = 4;
+    SessionReject reject = 5;
+    Heartbeat heartbeat = 6;
+  }
+}
+
+message LogonAck {
+  int64 session_id = 1;
+  uint64 next_expected_client_seq = 2;
+  uint32 heartbeat_interval_ms = 3;
+  uint32 gateway_id = 4;
+}
+
+message ExecutionReport {
+  uint32 shard_id = 1;
+  int64 event_seq = 2;       // with shard_id: the report's identity; use it to deduplicate after a resume
+  string exec_id = 3;        // "<shard>-<logPosition>-<eventIdx>"
+  int64 order_id = 4;
+  int64 cl_ord_id = 5;
+  int64 orig_cl_ord_id = 6;
+  string symbol = 7;
+  Side side = 8;
+  ExecType exec_type = 9;
+  OrdStatus ord_status = 10;
+  int64 price_cents = 11;
+  int64 order_qty = 12;
+  int64 last_qty = 13;
+  int64 last_px_cents = 14;
+  int64 leaves_qty = 15;
+  int64 cum_qty = 16;
+  int64 match_id = 17;
+  string reject_reason = 18; // RejectReason enum name, empty when none
+  string cancel_reason = 19; // CancelReason enum name, empty when none
+  string liquidity = 20;     // MAKER, TAKER, AUCTION or empty
+  int64 transact_time_ns = 21;
+  uint32 account_id = 22;
+  bool poss_dup = 23;        // true when replayed after a resume
+}
+
+message MassCancelAck {
+  int64 request_id = 1;
+  uint32 shard_id = 2;
+  int32 canceled_count = 3;
+  int32 shards_pending = 4;  // 0 on the final ack
+}
+
+// Refusals that never reached the matcher: throttling, validation, unavailability, bad sequence.
+message SessionReject {
+  enum Reason {
+    REASON_UNSPECIFIED = 0; NOT_LOGGED_ON = 1; AUTH_FAILED = 2; THROTTLED = 3; UNAVAILABLE = 4;
+    BAD_SEQUENCE = 5; UNKNOWN_SYMBOL = 6; INVALID_FIELD = 7; SYMBOL_NOT_TRADING = 8; MAX_ORDER_SIZE = 9;
+    DUPLICATE_SESSION = 10;
+  }
+  uint64 ref_seq = 1;
+  int64 ref_cl_ord_id = 2;
+  Reason reason = 3;
+  string text = 4;
+}
+
+message GetOrderRequest { uint32 firm_id = 1; int64 cl_ord_id = 2; }
+message OrderState {
+  bool found = 1;
+  ExecutionReport last_report = 2;
+}
+message ListSymbolsRequest {}
+message SymbolInfo {
+  uint32 symbol_id = 1;
+  string ticker = 2;
+  uint32 shard_id = 3;
+  int64 tick_size_cents = 4;
+  int64 lot_size = 5;
+  string state = 6;
+}
+message ListSymbolsResponse { repeated SymbolInfo symbols = 1; }
+message SessionStatusRequest { int64 session_id = 1; }
+message SessionStatus {
+  bool connected = 1;
+  uint32 gateway_id = 2;
+  uint64 last_client_seq = 3;
+  uint64 last_server_seq = 4;
+  repeated ShardCursor cursors = 5;
+}
