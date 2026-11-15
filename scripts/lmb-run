@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Runs one service from the assembled distribution.
+#   scripts/lmb-run <main-class> [-Dkey=value ...] [-- program args]
+# Build the distribution first: ./mvnw -DskipTests install
+# JVM heap and extra flags: LMB_HEAP (default 256m), LMB_JAVA_OPTS.
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LIB="${LMB_LIB:-$ROOT/dist/target/lmb/lib}"
+JAVA="java"
+[ -x "$ROOT/.tools/jdk/bin/java" ] && JAVA="$ROOT/.tools/jdk/bin/java"
+[ -n "${JAVA_HOME:-}" ] && [ ! -x "$ROOT/.tools/jdk/bin/java" ] && JAVA="$JAVA_HOME/bin/java"
+[ -d "$LIB" ] || { echo "distribution not found at $LIB; run ./mvnw -DskipTests install" >&2; exit 1; }
+MAIN="$1"; shift
+JVM_ARGS=(); APP_ARGS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --) shift; APP_ARGS+=("$@"); break ;;
+    -D*|-X*) JVM_ARGS+=("$1") ;;
+    *) APP_ARGS+=("$1") ;;
+  esac
+  shift
+done
+exec "$JAVA" \
+  --add-opens java.base/jdk.internal.misc=ALL-UNNAMED \
+  --add-opens java.base/sun.nio.ch=ALL-UNNAMED \
+  --add-opens java.base/java.util.zip=ALL-UNNAMED \
+  -Xmx"${LMB_HEAP:-256m}" -XX:+UseSerialGC ${LMB_JAVA_OPTS:-} \
+  "${JVM_ARGS[@]}" -cp "$LIB/*" "$MAIN" "${APP_ARGS[@]}"
