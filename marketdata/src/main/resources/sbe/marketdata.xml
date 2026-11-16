@@ -1,0 +1,177 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  LMB public market data wire protocol (schema id 2). Little endian.
+
+  UDP datagram  = PacketHeader (24 bytes) followed by PacketHeader.messageCount frames.
+  Frame         = uint16 frameLength (little endian, bytes that follow) + one SBE message (messageHeader + body).
+  TCP retransmit: the same frames on a stream. Request = one RetransmitRequest frame; response = one
+                  RetransmitResponse frame followed by RetransmitResponse.messageCount frames of sequenced messages.
+
+  Sequenced messages (templateId 1..9) start their body with SeqHeader. seq is a per-symbol sequence,
+  dense from 1, identical on feed A and feed B. See docs/modules/marketdata.md for the rules.
+-->
+<sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
+                   package="io.lmb.marketdata.sbe"
+                   id="2"
+                   version="1"
+                   semanticVersion="1.0"
+                   description="LMB public market data: incremental and snapshot channels, TCP retransmission"
+                   byteOrder="littleEndian">
+    <types>
+        <composite name="messageHeader" description="Standard SBE message header">
+            <type name="blockLength" primitiveType="uint16"/>
+            <type name="templateId" primitiveType="uint16"/>
+            <type name="schemaId" primitiveType="uint16"/>
+            <type name="version" primitiveType="uint16"/>
+        </composite>
+        <composite name="groupSizeEncoding" description="Repeating group dimensions">
+            <type name="blockLength" primitiveType="uint16"/>
+            <type name="numInGroup" primitiveType="uint16"/>
+        </composite>
+
+        <composite name="PacketHeader" description="First 24 bytes of every UDP datagram">
+            <type name="sessionId" primitiveType="uint32" description="Sequence space identity; identical on A and B. A change means every per-symbol sequence restarted"/>
+            <type name="feedId" primitiveType="uint8" description="0 = feed A (publisher instance 0), 1 = feed B (instance 1)"/>
+            <type name="channel" primitiveType="uint8" description="1 = incremental, 2 = snapshot"/>
+            <type name="messageCount" primitiveType="uint16" description="Frames in this datagram"/>
+            <type name="packetSeq" primitiveType="int64" description="Per publisher instance and channel, from 1. Diagnostic only: NOT comparable between A and B"/>
+            <type name="sendTimeNs" primitiveType="int64" description="Publisher wall clock at send, epoch ns"/>
+        </composite>
+
+        <composite name="SeqHeader" description="First field of every sequenced message (templateId 1..9), body offset 0">
+            <type name="seq" primitiveType="int64" description="Per-symbol sequence, dense from 1, identical on A and B"/>
+            <type name="transactTimeNs" primitiveType="int64" description="Cluster timestamp (epoch ns) of the log entry that caused it"/>
+            <type name="symbolId" primitiveType="uint32"/>
+            <type name="flags" primitiveType="uint8" description="bit 0 END_OF_BATCH: last message of this symbol for one log entry; the book is consistent after it"/>
+            <type name="reserved1" primitiveType="uint8"/>
+            <type name="reserved2" primitiveType="uint16"/>
+        </composite>
+
+        <type name="Price" primitiveType="int64" presence="optional" description="Integer cents. Null (Long.MIN_VALUE) = no price"/>
+        <type name="Qty" primitiveType="int64" description="Shares"/>
+        <type name="Ticker" primitiveType="char" length="8" characterEncoding="US-ASCII"/>
+
+        <enum name="BookSide" encodingType="uint8" description="Same values as io.lmb.sbe.Side">
+            <validValue name="BUY">1</validValue>
+            <validValue name="SELL">2</validValue>
+        </enum>
+        <enum name="TradingState" encodingType="uint8" description="Same values as io.lmb.sbe.SymbolState">
+            <validValue name="PRE_OPEN">1</validValue>
+            <validValue name="AUCTION_CALL">2</validValue>
+            <validValue name="CONTINUOUS">3</validValue>
+            <validValue name="HALTED">4</validValue>
+            <validValue name="CLOSED">5</validValue>
+            <validValue name="REMOVED">6</validValue>
+        </enum>
+        <enum name="YesNo" encodingType="uint8">
+            <validValue name="NO">0</validValue>
+            <validValue name="YES">1</validValue>
+        </enum>
+        <enum name="RetransmitStatus" encodingType="uint8">
+            <validValue name="OK">0</validValue>
+            <validValue name="TOO_OLD">1</validValue>
+            <validValue name="UNKNOWN_SYMBOL">2</validValue>
+            <validValue name="INVALID_RANGE">3</validValue>
+        </enum>
+    </types>
+
+    <!-- ============ Sequenced messages (incremental channel and retransmission) ============ -->
+
+    <sbe:message name="LevelUpdate" id="1" description="Price level total after the change. quantity 0 removes the level">
+        <field name="seqHeader" id="1" type="SeqHeader"/>
+        <field name="price" id="2" type="Price"/>
+        <field name="quantity" id="3" type="Qty"/>
+        <field name="orderCount" id="4" type="int32"/>
+        <field name="side" id="5" type="BookSide"/>
+    </sbe:message>
+
+    <sbe:message name="TradePrint" id="2">
+        <field name="seqHeader" id="1" type="SeqHeader"/>
+        <field name="matchId" id="2" type="int64"/>
+        <field name="price" id="3" type="Price"/>
+        <field name="quantity" id="4" type="Qty"/>
+        <field name="aggressorSide" id="5" type="BookSide" presence="optional" description="Null for auction trades"/>
+        <field name="isAuction" id="6" type="YesNo"/>
+    </sbe:message>
+
+    <sbe:message name="SymbolStatus" id="3">
+        <field name="seqHeader" id="1" type="SeqHeader"/>
+        <field name="reasonCode" id="2" type="uint16"/>
+        <field name="state" id="3" type="TradingState"/>
+        <field name="previousState" id="4" type="TradingState"/>
+    </sbe:message>
+
+    <sbe:message name="AuctionIndicative" id="4">
+        <field name="seqHeader" id="1" type="SeqHeader"/>
+        <field name="price" id="2" type="Price" description="Null when the book does not cross"/>
+        <field name="matchedQuantity" id="3" type="Qty"/>
+        <field name="imbalanceQuantity" id="4" type="Qty"/>
+        <field name="imbalanceSide" id="5" type="BookSide" presence="optional"/>
+        <field name="isFinal" id="6" type="YesNo"/>
+    </sbe:message>
+
+    <sbe:message name="InstrumentDefinition" id="5" description="Symbol created or its parameters changed">
+        <field name="seqHeader" id="1" type="SeqHeader"/>
+        <field name="tickSize" id="2" type="int64"/>
+        <field name="lotSize" id="3" type="Qty"/>
+        <field name="referencePrice" id="4" type="Price"/>
+        <field name="ticker" id="5" type="Ticker"/>
+        <field name="state" id="6" type="TradingState"/>
+    </sbe:message>
+
+    <!-- ============ Snapshot channel ============ -->
+
+    <sbe:message name="SnapshotBegin" id="10" description="Starts one symbol's snapshot. The book equals the state after applying every sequenced message up to lastSeq">
+        <field name="lastSeq" id="1" type="int64" description="seq of the last sequenced message included (0 = none yet)"/>
+        <field name="transactTimeNs" id="2" type="int64" description="transactTimeNs of that message"/>
+        <field name="tickSize" id="3" type="int64"/>
+        <field name="lotSize" id="4" type="Qty"/>
+        <field name="symbolId" id="5" type="uint32"/>
+        <field name="bidLevels" id="6" type="uint32" description="Bid levels that follow in SnapshotLevels"/>
+        <field name="askLevels" id="7" type="uint32" description="Ask levels that follow in SnapshotLevels"/>
+        <field name="ticker" id="8" type="Ticker"/>
+        <field name="state" id="9" type="TradingState"/>
+    </sbe:message>
+
+    <sbe:message name="SnapshotLevels" id="11" description="Levels in order: all bids best first, then all asks best first">
+        <field name="lastSeq" id="1" type="int64"/>
+        <field name="symbolId" id="2" type="uint32"/>
+        <group name="levels" id="3" dimensionType="groupSizeEncoding">
+            <field name="price" id="4" type="Price"/>
+            <field name="quantity" id="5" type="Qty"/>
+            <field name="orderCount" id="6" type="int32"/>
+            <field name="side" id="7" type="BookSide"/>
+        </group>
+    </sbe:message>
+
+    <sbe:message name="SnapshotEnd" id="12">
+        <field name="lastSeq" id="1" type="int64"/>
+        <field name="symbolId" id="2" type="uint32"/>
+    </sbe:message>
+
+    <!-- ============ Both channels ============ -->
+
+    <sbe:message name="Heartbeat" id="20" description="Sent on a channel idle for heartbeatIntervalMs">
+        <field name="heartbeatIntervalMs" id="1" type="uint32"/>
+    </sbe:message>
+
+    <!-- ============ TCP retransmission ============ -->
+
+    <sbe:message name="RetransmitRequest" id="30" description="Inclusive range of one symbol's sequence">
+        <field name="requestId" id="1" type="int64"/>
+        <field name="fromSeq" id="2" type="int64"/>
+        <field name="toSeq" id="3" type="int64"/>
+        <field name="symbolId" id="4" type="uint32"/>
+    </sbe:message>
+
+    <sbe:message name="RetransmitResponse" id="31" description="Followed by messageCount sequenced message frames, fromSeq..toSeq">
+        <field name="requestId" id="1" type="int64"/>
+        <field name="fromSeq" id="2" type="int64" description="First seq served"/>
+        <field name="toSeq" id="3" type="int64" description="Last seq served (may be below the requested toSeq: capped, or not published yet)"/>
+        <field name="oldestAvailableSeq" id="4" type="int64" description="Oldest seq the server still holds for the symbol (0 if none)"/>
+        <field name="lastSeq" id="5" type="int64" description="Latest seq published for the symbol"/>
+        <field name="symbolId" id="6" type="uint32"/>
+        <field name="messageCount" id="7" type="uint32"/>
+        <field name="status" id="8" type="RetransmitStatus"/>
+    </sbe:message>
+</sbe:messageSchema>

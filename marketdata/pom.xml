@@ -11,13 +11,62 @@
   <artifactId>lmb-marketdata</artifactId>
   <name>LMB market data publisher and client</name>
 
+  <properties>
+    <!-- The module's own wire protocol (package io.lmb.marketdata.sbe, schema id 2). -->
+    <sbe.schema.file>${project.basedir}/src/main/resources/sbe/marketdata.xml</sbe.schema.file>
+  </properties>
+
   <dependencies>
     <dependency><groupId>io.lmb</groupId><artifactId>lmb-common</artifactId></dependency>
     <dependency><groupId>io.lmb</groupId><artifactId>lmb-api-proto</artifactId></dependency>
+    <dependency><groupId>org.agrona</groupId><artifactId>agrona</artifactId></dependency>
     <dependency><groupId>io.grpc</groupId><artifactId>grpc-netty-shaded</artifactId></dependency>
+    <dependency><groupId>io.grpc</groupId><artifactId>grpc-stub</artifactId></dependency>
     <dependency><groupId>org.hdrhistogram</groupId><artifactId>HdrHistogram</artifactId></dependency>
     <dependency><groupId>io.prometheus</groupId><artifactId>prometheus-metrics-core</artifactId></dependency>
     <dependency><groupId>io.prometheus</groupId><artifactId>prometheus-metrics-exporter-httpserver</artifactId></dependency>
     <dependency><groupId>io.lmb</groupId><artifactId>lmb-testkit</artifactId><scope>test</scope></dependency>
   </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>generate-sbe</id>
+            <phase>generate-sources</phase>
+            <goals><goal>java</goal></goals>
+            <configuration>
+              <includeProjectDependencies>false</includeProjectDependencies>
+              <includePluginDependencies>true</includePluginDependencies>
+              <mainClass>uk.co.real_logic.sbe.SbeTool</mainClass>
+              <systemProperties>
+                <systemProperty><key>sbe.output.dir</key><value>${project.build.directory}/generated-sources/sbe</value></systemProperty>
+                <systemProperty><key>sbe.target.language</key><value>Java</value></systemProperty>
+                <systemProperty><key>sbe.validation.stop.on.error</key><value>true</value></systemProperty>
+                <systemProperty><key>sbe.java.generate.interfaces</key><value>true</value></systemProperty>
+              </systemProperties>
+              <arguments><argument>${sbe.schema.file}</argument></arguments>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>build-helper-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>add-sbe-sources</id>
+            <phase>generate-sources</phase>
+            <goals><goal>add-source</goal></goals>
+            <configuration>
+              <sources><source>${project.build.directory}/generated-sources/sbe</source></sources>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
 </project>
