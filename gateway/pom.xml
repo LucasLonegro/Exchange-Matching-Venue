@@ -16,6 +16,10 @@
     <dependency><groupId>io.lmb</groupId><artifactId>lmb-api-proto</artifactId></dependency>
     <dependency><groupId>io.lmb</groupId><artifactId>lmb-fix-codecs</artifactId></dependency>
     <dependency><groupId>uk.co.real-logic</groupId><artifactId>artio-core</artifactId></dependency>
+    <dependency><groupId>io.aeron</groupId><artifactId>aeron-driver</artifactId></dependency>
+    <dependency><groupId>io.aeron</groupId><artifactId>aeron-archive</artifactId></dependency>
+    <dependency><groupId>io.aeron</groupId><artifactId>aeron-client</artifactId></dependency>
+    <dependency><groupId>org.agrona</groupId><artifactId>agrona</artifactId></dependency>
     <dependency><groupId>io.grpc</groupId><artifactId>grpc-netty-shaded</artifactId></dependency>
     <dependency><groupId>io.grpc</groupId><artifactId>grpc-services</artifactId></dependency>
     <dependency><groupId>org.hdrhistogram</groupId><artifactId>HdrHistogram</artifactId></dependency>

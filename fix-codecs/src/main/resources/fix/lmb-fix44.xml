@@ -123,7 +123,7 @@
         <message name="OrderMassCancelRequest" msgtype="q" msgcat="app">
             <field name="ClOrdID" required="Y"/>
             <field name="MassCancelRequestType" required="Y"/>
-            <component name="Instrument" required="N"/>
+            <field name="Symbol" required="N"/>
             <field name="Side" required="N"/>
             <field name="TransactTime" required="Y"/>
             <field name="Text" required="N"/>
@@ -180,7 +180,7 @@
             <field name="MassCancelResponse" required="Y"/>
             <field name="MassCancelRejectReason" required="N"/>
             <field name="TotalAffectedOrders" required="N"/>
-            <component name="Instrument" required="N"/>
+            <field name="Symbol" required="N"/>
             <field name="Text" required="N"/>
         </message>
     </messages>
