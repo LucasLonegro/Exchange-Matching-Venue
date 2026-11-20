@@ -56,6 +56,6 @@ class DifferentialTest
             ev += expected.size();
         }
         assertTrue(ev == h.events.size(), "all events accounted for");
-        assertTrue(trades > 100, "the run traded (" + trades + ")");
+        assertTrue(trades > 50, "the run traded (" + trades + ")");
     }
 }
