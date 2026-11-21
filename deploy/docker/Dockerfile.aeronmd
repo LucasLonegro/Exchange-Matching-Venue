@@ -1,0 +1,32 @@
+# syntax=docker/dockerfile:1.7
+# Aeron C media driver (aeronmd), the production driver the JVMs attach to (lmb.driver.embedded=false).
+# Version must match the Java client (root pom aeron.version).
+#   docker build -f deploy/docker/Dockerfile.aeronmd -t lmb-aeronmd:1.54.2 deploy/docker
+# Configure with AERON_* environment variables (see deploy/baremetal/aeronmd/aeronmd.env.example).
+ARG AERON_VERSION=1.54.2
+FROM ubuntu:24.04 AS build
+ARG AERON_VERSION
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends build-essential cmake git ca-certificates \
+      libbsd-dev uuid-dev zlib1g-dev \
+ && rm -rf /var/lib/apt/lists/*
+RUN git clone --depth 1 --branch "${AERON_VERSION}" https://github.com/aeron-io/aeron.git /src/aeron
+WORKDIR /src/aeron/build
+RUN cmake -DCMAKE_BUILD_TYPE=Release -DAERON_TESTS=OFF -DAERON_SYSTEM_TESTS=OFF \
+      -DAERON_BUILD_SAMPLES=OFF -DAERON_BUILD_DOCUMENTATION=OFF -DBUILD_AERON_DRIVER=ON \
+      -DBUILD_AERON_ARCHIVE_API=OFF .. \
+ && make -j"$(nproc)" aeronmd \
+ && strip binaries/aeronmd
+
+FROM ubuntu:24.04
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libbsd0 libuuid1 zlib1g tini \
+ && rm -rf /var/lib/apt/lists/* \
+ && groupadd --system --gid 10001 lmb && useradd --system --uid 10001 --gid lmb lmb
+COPY --from=build /src/aeron/build/binaries/aeronmd /usr/local/bin/aeronmd
+USER 10001:10001
+ENV AERON_DIR=/dev/shm/aeron \
+    AERON_THREADING_MODE=DEDICATED \
+    AERON_DIR_DELETE_ON_START=1 \
+    AERON_DIR_DELETE_ON_SHUTDOWN=1
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/aeronmd"]

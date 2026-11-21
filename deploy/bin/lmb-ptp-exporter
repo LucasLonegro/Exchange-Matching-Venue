@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Publishes the PTP state of this host for Prometheus through node_exporter's textfile collector:
+#   lmb_host_ptp_offset_ns       ptp4l master offset (this clock minus grandmaster), ns
+#   lmb_host_ptp_gm_present      1 when ptp4l has a grandmaster
+#   lmb_host_ptp_port_state      1 when the port is SLAVE (synchronised), 0 otherwise
+#   lmb_host_phc2sys_offset_ns   last offset reported by phc2sys (system clock vs PHC), when its log is readable
+# Names must match PTP_OFFSET in deploy/monitoring/metric-names.env.
+#
+#   lmb-ptp-exporter [--dir /var/lib/node_exporter/textfile] [--interval 1] [--once]
+# Needs linuxptp's pmc and access to ptp4l's UDS (/var/run/ptp4l): run as root or the ptp group.
+set -euo pipefail
+DIR=/var/lib/node_exporter/textfile; INTERVAL=1; ONCE=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dir) DIR="$2"; shift ;;
+    --interval) INTERVAL="$2"; shift ;;
+    --once) ONCE=1 ;;
+    *) echo "unknown option $1" >&2; exit 64 ;;
+  esac
+  shift
+done
+mkdir -p "$DIR"
+out="$DIR/lmb_ptp.prom"
+
+sample() {
+  local ts port offset gm state phc
+  ts="$(pmc -u -b 0 'GET TIME_STATUS_NP' 2>/dev/null || true)"
+  port="$(pmc -u -b 0 'GET PORT_DATA_SET' 2>/dev/null || true)"
+  offset="$(awk '$1 == "master_offset" { print $2; exit }' <<< "$ts")"
+  gm="$(awk '$1 == "gmPresent" { print ($2 == "true") ? 1 : 0; exit }' <<< "$ts")"
+  state="$(awk '$1 == "portState" { print ($2 == "SLAVE") ? 1 : 0; exit }' <<< "$port")"
+  phc="$(journalctl -u lmb-phc2sys -n 5 -o cat 2>/dev/null | awk '/offset/ { for (i = 1; i <= NF; i++) if ($i == "offset") v = $(i + 1) } END { print v }')"
+  {
+    echo "# HELP lmb_host_ptp_offset_ns ptp4l master offset in nanoseconds"
+    echo "# TYPE lmb_host_ptp_offset_ns gauge"
+    [ -n "$offset" ] && echo "lmb_host_ptp_offset_ns $offset"
+    echo "# TYPE lmb_host_ptp_gm_present gauge"
+    echo "lmb_host_ptp_gm_present ${gm:-0}"
+    echo "# TYPE lmb_host_ptp_port_state gauge"
+    echo "lmb_host_ptp_port_state ${state:-0}"
+    if [ -n "$phc" ]; then
+      echo "# TYPE lmb_host_phc2sys_offset_ns gauge"
+      echo "lmb_host_phc2sys_offset_ns $phc"
+    fi
+  } > "$out.tmp"
+  mv -f "$out.tmp" "$out"
+}
+
+while :; do
+  sample
+  [ "$ONCE" -eq 1 ] && exit 0
+  sleep "$INTERVAL"
+done

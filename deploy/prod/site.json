@@ -1,0 +1,17 @@
+{
+  "_comment": "Site description for deploy/prod/render.py and deploy/k8s/render.py. Host names are patterns; replace domains and counts with the real site.",
+  "shards": 16,
+  "membersPerShard": 3,
+  "membersPerHost": 1,
+  "gateways": 4,
+  "primary": {
+    "name": "region P (primary)",
+    "domain": "p.lmb.internal",
+    "zones": ["az-a", "az-b", "az-c"]
+  },
+  "dr": {
+    "name": "region D (disaster recovery)",
+    "domain": "d.lmb.internal",
+    "zones": ["dz-a", "dz-b", "dz-c"]
+  }
+}

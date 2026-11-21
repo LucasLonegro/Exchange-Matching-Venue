@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Pins named JVM threads to cores once they exist: the busy-spinning Aeron agents get an isolated core
+# each, everything else (GC, JIT, logging, gRPC) stays on the JVM's general cpu set.
+#
+#   lmb-pin-threads <pid> <thread-prefix>=<cpu> [...] [--timeout SECS]
+#   lmb-pin-threads 4242 consensus-module=4 clustered-service=5 archive-recorder=6 lmb-events=7
+#
+# Thread names come from /proc/<pid>/task/*/comm, which the kernel truncates to 15 characters, so the
+# prefix is truncated the same way. Aeron agents are named after their role (consensus-module,
+# clustered-service..., archive-conductor/recorder/replayer); check with
+#   ps -L -o tid,comm,psr -p <pid>
+# and adjust LMB_PIN. Run by deploy/bin/lmb-service when LMB_PIN is set. Exit 1 if a thread never shows up.
+set -euo pipefail
+pid="${1:?usage: lmb-pin-threads <pid> name=cpu ...}"; shift
+timeout=180
+declare -A want=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --timeout) timeout="$2"; shift ;;
+    *=*) want["${1%%=*}"]="${1#*=}" ;;
+    *) echo "bad mapping '$1' (want name=cpu)" >&2; exit 64 ;;
+  esac
+  shift
+done
+[ "${#want[@]}" -gt 0 ] || exit 0
+declare -A done_=()
+deadline=$((SECONDS + timeout))
+while [ "${#done_[@]}" -lt "${#want[@]}" ] && [ "$SECONDS" -lt "$deadline" ]; do
+  [ -d "/proc/$pid" ] || { echo "process $pid exited"; exit 1; }
+  for task in /proc/"$pid"/task/*; do
+    comm="$(cat "$task/comm" 2>/dev/null || true)"
+    for prefix in "${!want[@]}"; do
+      [ -n "${done_[$prefix]:-}" ] && continue
+      p15="${prefix:0:15}"
+      if [ "${comm:0:${#p15}}" = "$p15" ]; then
+        tid="${task##*/}"
+        if taskset -cp "${want[$prefix]}" "$tid" > /dev/null; then
+          echo "pinned $comm (tid $tid) to cpu ${want[$prefix]}"
+          done_[$prefix]=1
+        fi
+      fi
+    done
+  done
+  sleep 0.5
+done
+missing=()
+for prefix in "${!want[@]}"; do [ -n "${done_[$prefix]:-}" ] || missing+=("$prefix"); done
+if [ "${#missing[@]}" -gt 0 ]; then echo "threads never appeared: ${missing[*]}" >&2; exit 1; fi

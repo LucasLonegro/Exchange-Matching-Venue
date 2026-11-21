@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# systemd ExecStartPost helper: waits until the unit's current invocation printed "LMB_READY",
+# so `systemctl start lmb@x` returns only once the service is serving (ARCHITECTURE.md section 5).
+#   lmb-wait-ready <instance> [timeout-seconds]
+set -euo pipefail
+inst="${1:?instance}"; timeout="${2:-600}"
+unit="lmb@$inst.service"
+inv="${INVOCATION_ID:-$(systemctl show -p InvocationID --value "$unit")}"
+deadline=$((SECONDS + timeout))
+while [ "$SECONDS" -lt "$deadline" ]; do
+  if journalctl "_SYSTEMD_INVOCATION_ID=$inv" -o cat --no-pager 2>/dev/null | grep -qE '^LMB_READY( |$)'; then
+    exit 0
+  fi
+  systemctl is-active --quiet "$unit" || [ "$(systemctl show -p SubState --value "$unit")" = start-post ] || {
+    echo "$unit exited before LMB_READY" >&2; exit 1; }
+  sleep 0.5
+done
+echo "$unit: no LMB_READY within ${timeout}s" >&2
+exit 1

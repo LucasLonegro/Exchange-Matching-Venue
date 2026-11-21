@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# Production launcher for one LMB service: used by the systemd units (deploy/baremetal/systemd) and as
+# the container entrypoint (deploy/docker/Dockerfile). The local profile uses scripts/lmb-run instead.
+#
+#   lmb-service <service>-<id>        bare metal, e.g. lmb-service node-3-0, lmb-service gateway-1
+#   lmb-service <service>             container: id from LMB_INSTANCE_ID, or the StatefulSet ordinal of
+#                                     POD_NAME (nodes: shard from LMB_SHARD_ID, member = ordinal;
+#                                     replayer/backup: shard = ordinal)
+#   lmb-service --print <service>-<id>   print the java command line instead of running it
+# Services: node backup gateway marketdata consolidator controlplane posttrade replayer feedsim
+#
+# Environment (bare metal: /etc/lmb/lmb.env, /etc/lmb/<service>.env, /etc/lmb/instances/<name>.env,
+# sourced in that order; containers: the pod spec). Any LMB_<KEY> is configuration key lmb.<key>.
+#   LMB_HEAP (e.g. 8g; -Xms = -Xmx)   LMB_GC (zgc|g1|serial, default zgc)   LMB_LARGE_PAGES (1: hugetlbfs)
+#   LMB_CPUS (cpu list for the whole JVM, taskset)   LMB_PIN ("thread-prefix=cpu ..." see lmb-pin-threads)
+#   LMB_JAVA_OPTS (extra JVM flags)   LMB_TOPOLOGY (/etc/lmb/topology.properties)
+#   LMB_DATA_DIR (/var/lib/lmb)   LMB_LOG_DIR (/var/log/lmb)   LMB_HOME (/opt/lmb)
+#   LMB_EXTERNAL_DRIVER (default 1: an Aeron C media driver runs beside it at /dev/shm/aeron-<name>)
+set -euo pipefail
+
+PRINT=0
+if [ "${1:-}" = --print ]; then PRINT=1; shift; fi
+arg="${1:?usage: lmb-service [--print] <service>[-<id>]}"
+svc="${arg%%-*}"
+id=""; [ "$arg" != "$svc" ] && id="${arg#*-}"
+
+ETC="${LMB_ETC:-/etc/lmb}"
+set -a
+for f in "$ETC/lmb.env" "$ETC/$svc.env" ${id:+"$ETC/instances/$svc-$id.env"}; do
+  # shellcheck disable=SC1090
+  [ -f "$f" ] && . "$f"
+done
+set +a
+
+LMB_HOME="${LMB_HOME:-/opt/lmb}"
+JAVA="${JAVA:-${JAVA_HOME:+$JAVA_HOME/bin/}java}"
+
+case "$svc" in
+  node)         main=io.lmb.cluster.ClusterNodeMain ;;
+  backup)       main=io.lmb.cluster.ClusterBackupMain ;;
+  gateway)      main=io.lmb.gateway.GatewayMain ;;
+  marketdata)   main=io.lmb.marketdata.MarketDataPublisherMain ;;
+  consolidator) main=io.lmb.feeds.ConsolidatorMain ;;
+  feedsim)      main=io.lmb.feeds.FeedSimulatorMain ;;
+  controlplane) main=io.lmb.controlplane.ControlPlaneMain ;;
+  posttrade)    main=io.lmb.posttrade.PostTradeMain ;;
+  replayer)     main=io.lmb.replayer.ShadowReplayerMain ;;
+  *) echo "lmb-service: unknown service '$svc'" >&2; exit 64 ;;
+esac
+
+# ---- identity ----------------------------------------------------------------------------------------
+ordinal() { local p="${POD_NAME:-}"; [[ "$p" =~ -([0-9]+)$ ]] && echo "${BASH_REMATCH[1]}"; }
+ident=()
+case "$svc" in
+  node)
+    if [ -n "$id" ]; then shard="${id%%-*}"; member="${id#*-}"
+    else shard="${LMB_SHARD_ID:?LMB_SHARD_ID}"; member="${LMB_MEMBER_ID:-$(ordinal)}"; fi
+    [[ "$shard" =~ ^[0-9]+$ && "$member" =~ ^[0-9]+$ ]] || { echo "lmb-service: bad node id '$id'" >&2; exit 64; }
+    ident=("-Dlmb.shard.id=$shard" "-Dlmb.member.id=$member"); name="node-$shard-$member" ;;
+  replayer|backup)
+    shard="${id:-${LMB_SHARD_ID:-$(ordinal)}}"
+    ident=("-Dlmb.shard.id=$shard" "-Dlmb.instance.id=$shard"); name="$svc-$shard" ;;
+  *)
+    inst="${id:-${LMB_INSTANCE_ID:-$(ordinal)}}"
+    ident=("-Dlmb.instance.id=${inst:?no instance id}"); name="$svc-$inst" ;;
+esac
+
+LOG_DIR="${LMB_LOG_DIR:-/var/log/lmb}"
+AERON_DIR="${LMB_AERON_DIR:-/dev/shm/aeron-$name}"
+
+# ---- JVM ---------------------------------------------------------------------------------------------
+heap="${LMB_HEAP:-2g}"
+jvm=(-Xms"$heap" -Xmx"$heap" -XX:+AlwaysPreTouch -XX:+PerfDisableSharedMem -XX:+ExitOnOutOfMemoryError
+     -XX:+UnlockDiagnosticVMOptions -XX:GuaranteedSafepointInterval=0
+     -Xss1m -Djava.net.preferIPv4Stack=true -Dagrona.disable.bounds.checks=true
+     --add-opens java.base/jdk.internal.misc=ALL-UNNAMED --add-opens java.base/sun.nio.ch=ALL-UNNAMED
+     --add-opens java.base/java.util.zip=ALL-UNNAMED
+     "-Xlog:gc*,safepoint:file=$LOG_DIR/$name-gc.log:time,uptimenanos,level,tags:filecount=10,filesize=50m")
+case "${LMB_GC:-zgc}" in
+  zgc)    jvm+=(-XX:+UseZGC -XX:+ZGenerational) ;;
+  g1)     jvm+=(-XX:+UseG1GC -XX:MaxGCPauseMillis=5) ;;
+  serial) jvm+=(-XX:+UseSerialGC) ;;
+  *) echo "lmb-service: LMB_GC must be zgc, g1 or serial" >&2; exit 64 ;;
+esac
+if [ "${LMB_LARGE_PAGES:-0}" = 1 ]; then jvm+=(-XX:+UseLargePages); else jvm+=(-XX:+UseTransparentHugePages); fi
+props=("-Dlmb.topology=${LMB_TOPOLOGY:-$ETC/topology.properties}" "-Dlmb.data.dir=${LMB_DATA_DIR:-/var/lib/lmb}")
+if [ "${LMB_EXTERNAL_DRIVER:-1}" = 1 ]; then
+  props+=("-Dlmb.driver.embedded=false" "-Dlmb.aeron.dir=$AERON_DIR" "-Daeron.dir=$AERON_DIR")
+fi
+# shellcheck disable=SC2206
+extra=(${LMB_JAVA_OPTS:-})
+cmd=("$JAVA" "${jvm[@]}" "${extra[@]+"${extra[@]}"}" "${props[@]}" "${ident[@]}" -cp "$LMB_HOME/lib/*" "$main")
+if [ -n "${LMB_CPUS:-}" ]; then cmd=(taskset -c "$LMB_CPUS" "${cmd[@]}"); fi
+
+if [ "$PRINT" -eq 1 ]; then printf '%q ' "${cmd[@]}"; echo; exit 0; fi
+mkdir -p "$LOG_DIR" 2>/dev/null || true
+if [ -n "${LMB_PIN:-}" ]; then
+  # Detached (double fork) so it is not left as a zombie child of the JVM. Pins named threads once
+  # they exist; $$ stays the JVM's pid after exec.
+  # shellcheck disable=SC2086
+  setsid -f "$(dirname "$0")/lmb-pin-threads" "$$" $LMB_PIN > "$LOG_DIR/$name-pin.log" 2>&1 < /dev/null || true
+fi
+exec "${cmd[@]}"
