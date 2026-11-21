@@ -1,0 +1,21 @@
+# Prometheus for the local profile (deploy/local/docker-compose.yml, host network).
+# Targets come from the running local system: scripts/local-up.sh writes
+# data/local/run/prometheus/targets.json (deploy/monitoring/render.py file-sd), mounted at /lmb-run.
+# Rules are deploy/monitoring/generated (recording rules + local alert thresholds).
+global:
+  scrape_interval: 2s
+  evaluation_interval: 2s
+  external_labels:
+    venue: lmb-local
+rule_files:
+  - /etc/prometheus/rules/recording-rules.yml
+  - /etc/prometheus/rules/alerts-local.yml
+scrape_configs:
+  - job_name: lmb
+    honor_labels: true      # keep the services' own shard/member labels
+    file_sd_configs:
+      - files: ["/lmb-run/targets.json"]
+        refresh_interval: 5s
+  - job_name: prometheus
+    static_configs:
+      - targets: ["127.0.0.1:9090"]

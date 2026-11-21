@@ -1,0 +1,148 @@
+# Optional infrastructure for the fuller local profile. The local venue itself runs without Docker
+# (scripts/local-up.sh); with these up, `scripts/local-up.sh --full` points the services at them
+# through deploy/local/full.env.
+#
+#   docker compose -f deploy/local/docker-compose.yml up -d        # all of it (~1.5 GB RAM)
+#   docker compose -f deploy/local/docker-compose.yml up -d prometheus grafana   # monitoring only
+#   docker compose -f deploy/local/docker-compose.yml down -v      # stop and delete volumes
+#
+# Ports (host): PostgreSQL 5432, Redpanda Kafka 19092 / admin 19644, ClickHouse HTTP 8123 / native 19000,
+# MinIO S3 9002 / console 9003, Prometheus 9090, Grafana 3000, Envoy REST 8080 / admin 15000.
+# Prometheus, Grafana and Envoy use host networking (Linux) because the venue's processes listen on
+# 127.0.0.1 of the host; on macOS/Windows replace 127.0.0.1 with host.docker.internal in their configs.
+# Paths are relative to this file. Credentials are for local use only.
+name: lmb-local
+
+services:
+  postgres:
+    image: postgres:16.4
+    environment:
+      POSTGRES_DB: lmb
+      POSTGRES_USER: lmb
+      POSTGRES_PASSWORD: lmb-local-only
+    ports: ["127.0.0.1:5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lmb -d lmb"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    mem_limit: 256m
+
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.7
+    command:
+      - redpanda
+      - start
+      - --mode=dev-container
+      - --smp=1
+      - --memory=512M
+      - --reserve-memory=0M
+      - --overprovisioned
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://127.0.0.1:19092
+      - --rpc-addr=0.0.0.0:33145
+      - --advertise-rpc-addr=redpanda:33145
+    ports: ["127.0.0.1:19092:19092", "127.0.0.1:19644:9644"]
+    volumes: ["redpanda:/var/lib/redpanda/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    mem_limit: 768m
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    environment:
+      CLICKHOUSE_DB: lmb
+      CLICKHOUSE_USER: lmb
+      CLICKHOUSE_PASSWORD: lmb-local-only
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports: ["127.0.0.1:8123:8123", "127.0.0.1:19000:9000"]
+    volumes: ["clickhouse:/var/lib/clickhouse"]
+    ulimits:
+      nofile: {soft: 262144, hard: 262144}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8123/ping | grep -q Ok"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    mem_limit: 768m
+
+  minio:
+    image: minio/minio:RELEASE.2024-10-13T13-34-11Z
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: lmb-local
+      MINIO_ROOT_PASSWORD: lmb-local-secret
+    ports: ["127.0.0.1:9002:9000", "127.0.0.1:9003:9001"]
+    volumes: ["minio:/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    mem_limit: 256m
+
+  # Creates the WORM bucket with S3 Object Lock. Locally GOVERNANCE mode for 1 day so the bucket can
+  # still be cleaned (`down -v`); production uses COMPLIANCE mode with the regulatory retention.
+  minio-init:
+    image: minio/mc:RELEASE.2024-10-08T09-37-26Z
+    depends_on:
+      minio: {condition: service_healthy}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        mc alias set local http://minio:9000 lmb-local lmb-local-secret &&
+        mc mb --ignore-existing --with-lock local/lmb-worm &&
+        mc retention set --default GOVERNANCE 1d local/lmb-worm &&
+        mc retention info --default local/lmb-worm
+    restart: "no"
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    network_mode: host
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --web.listen-address=127.0.0.1:9090
+      - --storage.tsdb.retention.time=2d
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../monitoring/generated:/etc/prometheus/rules:ro
+      # written by scripts/local-up.sh (file_sd targets of the current local run)
+      - ../../data/local/run/prometheus:/lmb-run:ro
+    mem_limit: 512m
+
+  grafana:
+    image: grafana/grafana:11.2.2
+    network_mode: host
+    environment:
+      GF_SERVER_HTTP_ADDR: 127.0.0.1
+      GF_SERVER_HTTP_PORT: "3000"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_SECURITY_ADMIN_PASSWORD: lmb-local-only
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../monitoring/generated/grafana-dashboard.json:/var/lib/grafana/dashboards/lmb/lmb-venue.json:ro
+    mem_limit: 256m
+
+  # REST/JSON in front of the gateways' OrderQuery gRPC service (gRPC-JSON transcoder). The descriptor
+  # set is built by api-proto (./mvnw -q -pl api-proto install). Example:
+  #   curl -H 'x-lmb-api-key: alpha-key' http://127.0.0.1:8080/v1/symbols
+  envoy:
+    image: envoyproxy/envoy:v1.31.2
+    network_mode: host
+    command: ["envoy", "-c", "/etc/envoy/envoy.yaml", "--log-level", "info"]
+    volumes:
+      - ./envoy/envoy.yaml:/etc/envoy/envoy.yaml:ro
+      - ../../api-proto/target/generated-resources/protobuf/descriptor-sets/lmb-api.pb:/etc/envoy/lmb-api.pb:ro
+    mem_limit: 128m
+
+volumes:
+  pgdata: {}
+  redpanda: {}
+  clickhouse: {}
+  minio: {}
