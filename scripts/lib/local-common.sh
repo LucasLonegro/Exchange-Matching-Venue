@@ -283,18 +283,19 @@ leader_by_metrics() {
     if [ -n "${CLUSTER_ROLE:-}" ]; then
       v="$(metric_value "$CLUSTER_ROLE" "$body")"
       if [ -n "$v" ]; then
-        if awk -v x="$v" 'BEGIN { exit !(x + 0 == 2) }'; then echo "$m"; return 0; fi
+        if awk -v x="$v" 'BEGIN { exit !(x + 0 == 2) }'; then LMB_LEADER="$m"; return 0; fi
         continue
       fi
     fi
     if [ -n "${CLUSTER_LEADER_MEMBER_ID:-}" ]; then
       v="$(metric_value "$CLUSTER_LEADER_MEMBER_ID" "$body")"
       if [ -n "$v" ] && awk -v x="$v" 'BEGIN { exit !(x + 0 >= 0) }'; then
-        printf '%d\n' "${v%%.*}"; return 0
+        LMB_LEADER="${v%%.*}"; return 0
       fi
     fi
     LMB_LEADER_DIAG+="metrics: node-$s-$m serves metrics but neither ${CLUSTER_ROLE:-?} nor ${CLUSTER_LEADER_MEMBER_ID:-?} (deploy/monitoring/metric-names.env); "
   done
+  LMB_LEADER_DIAG+="metrics: no member of shard $s reports itself leader (election in progress or no quorum); "
   return 1
 }
 
@@ -306,6 +307,9 @@ cluster_dirs() {
     [ -f "$d/cluster-mark.dat" ] && echo "$d"
     return 0
   fi
+  # cluster-node's layout (NodeConfig.memberDir): <lmb.data.dir>/cluster-node/shard-S-member-M/cluster
+  d="$LMB_DATA/cluster-node/shard-$s-member-$m/cluster"
+  if [ -f "$d/cluster-mark.dat" ]; then echo "$d"; return 0; fi
   [ -d "$LMB_DATA" ] || return 0
   find "$LMB_DATA" -maxdepth 6 -name cluster-mark.dat -printf '%h\n' 2>/dev/null \
     | grep -E "(node|cluster|shard)[^/]*[-_.]${s}[-_./](member[-_]?)?${m}(/|$)|shard[-_]?${s}/(member|node)[-_]?${m}(/|$)" \
@@ -326,7 +330,7 @@ leader_by_clustertool() {
       [ -n "$dir" ] || continue
       out="$(clustertool "$dir" list-members)"
       id="$(sed -n 's/.*leaderMemberId=\(-\{0,1\}[0-9]\{1,\}\).*/\1/p' <<< "$out" | head -n1)"
-      if [ -n "$id" ] && [ "$id" -ge 0 ]; then echo "$id"; return 0; fi
+      if [ -n "$id" ] && [ "$id" -ge 0 ]; then LMB_LEADER="$id"; return 0; fi
       LMB_LEADER_DIAG+="clustertool: $dir list-members gave no leader; "
     done < <(cluster_dirs "$s" "$m")
   done
@@ -334,19 +338,22 @@ leader_by_clustertool() {
   return 1
 }
 
+# shard_leader sets LMB_LEADER (member id) and returns 0, or returns 1 with the reasons in
+# LMB_LEADER_DIAG. Call it directly, not in $(...), or the diagnostics are lost with the subshell.
+LMB_LEADER=""
 shard_leader() {
   local s="$1" method id
-  LMB_LEADER_DIAG=""
+  LMB_LEADER_DIAG=""; LMB_LEADER=""
   for method in ${LMB_LEADER_METHODS:-hook metrics clustertool}; do
     case "$method" in
       hook)
         [ -n "${LMB_LEADER_CMD:-}" ] || continue
         id="$(bash -c "$LMB_LEADER_CMD \"\$1\"" _ "$s" 2>/dev/null | tr -dc '0-9')"
-        [ -n "$id" ] && { echo "$id"; return 0; }
+        [ -n "$id" ] && { LMB_LEADER="$id"; return 0; }
         LMB_LEADER_DIAG+="hook: LMB_LEADER_CMD printed nothing; " ;;
       metrics)     leader_by_metrics "$s" && return 0 ;;
       clustertool) leader_by_clustertool "$s" && return 0 ;;
-      *)           warn "unknown leader method '$method'" ;;
+      *)           LMB_LEADER_DIAG+="unknown method '$method'; " ;;
     esac
   done
   return 1

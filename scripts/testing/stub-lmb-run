@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Stand-in for scripts/lmb-run that starts no JVM: lets the local scripts be rehearsed (ordering,
+# readiness, pid tracking, shutdown, failure handling) on any machine, in seconds, with ~1 MB per process.
+#
+#   LMB_RUNNER=scripts/testing/stub-lmb-run LMB_LOCAL_DATA=/tmp/x scripts/local-up.sh
+#
+# Same interface as lmb-run: <main-class> [-Dkey=value ...]. Behaviour knobs (environment):
+#   STUB_DELAY=0.3        seconds before printing LMB_READY
+#   STUB_FAIL=<regex>     exit 1 before LMB_READY when "<main> <identity>" matches (e.g. 'GatewayMain.*instance.id=1')
+#   STUB_HANG=<regex>     never print LMB_READY when it matches (exercises the timeout)
+#   STUB_IGNORE_TERM=<regex>   ignore SIGTERM when it matches (exercises the SIGKILL fallback)
+#   STUB_LEADER_FILE=<file>    nodes whose "<shard> <member>" is in this file act as leader (see below)
+# With STUB_LEADER_FILE set, kill-leader.sh can be rehearsed with LMB_LEADER_METHODS=hook and
+# LMB_LEADER_CMD="scripts/testing/stub-lmb-run --leader-of" (prints the first live member listed).
+set -u
+if [ "${1:-}" = --leader-of ]; then
+  shard="$2"; f="${STUB_LEADER_FILE:?}"
+  while read -r s m pid; do
+    [ "$s" = "$shard" ] && kill -0 "$pid" 2>/dev/null && { echo "$m"; exit 0; }
+  done < "$f"
+  exit 1
+fi
+main="${1:?main class}"; shift
+svc="${main##*.}"; ident=""
+for a in "$@"; do
+  case "$a" in
+    -Dlmb.shard.id=*)    ident+=" shard=${a#*=}" ;;
+    -Dlmb.member.id=*)   ident+=" member=${a#*=}" ;;
+    -Dlmb.instance.id=*) ident+=" instance.id=${a#*=}" ;;
+  esac
+done
+key="$main$ident"
+echo "stub: $key heap=${LMB_HEAP:-} opts=${LMB_JAVA_OPTS:-} args=$*"
+if [ -n "${STUB_IGNORE_TERM:-}" ] && [[ "$key" =~ $STUB_IGNORE_TERM ]]; then
+  trap 'echo "stub: ignoring SIGTERM"' TERM
+else
+  trap 'echo "stub: SIGTERM, exiting"; exit 0' TERM
+fi
+sleep "${STUB_DELAY:-0.3}"
+if [ -n "${STUB_FAIL:-}" ] && [[ "$key" =~ $STUB_FAIL ]]; then echo "stub: simulated startup failure" >&2; exit 1; fi
+if [ -n "${STUB_LEADER_FILE:-}" ] && [ "$svc" = ClusterNodeMain ]; then
+  s="${ident#* shard=}"; s="${s%% *}"; m="${ident#* member=}"; m="${m%% *}"
+  echo "$s $m $$" >> "$STUB_LEADER_FILE"
+fi
+if [ -n "${STUB_HANG:-}" ] && [[ "$key" =~ $STUB_HANG ]]; then
+  echo "stub: hanging without LMB_READY"
+else
+  echo "LMB_READY ${svc%Main} ${ident# }"
+fi
+# Block in a builtin (no child process that a SIGKILL would orphan); traps still run.
+exec {hold}<> <(:)
+while :; do read -r -t 3600 -u "$hold" _ || true; done

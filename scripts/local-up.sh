@@ -61,7 +61,7 @@ WITH_POSTTRADE=1; WITH_REPLAYER=1; WITH_FEEDSIM=1
 FULL=0; DRY_RUN=0; FORCE=0; KEEP_ON_FAILURE=0; STRICT_LEADERS=0
 TIER_TIMEOUT=120; LEADER_TIMEOUT=60
 RESTART=""
-declare -a SKIP=() CLI_ENV=() CLI_JVM=() CLI_HEAP=()
+declare -a SKIP=() CLI_ENV=() CLI_JVM=() CLI_HEAP=() SKIPPED_MISSING=()
 
 need() { [ $# -ge 2 ] && [ -n "$2" ] || die "option $1 needs a value (see --help)"; }
 posint() { [[ "$2" =~ ^[1-9][0-9]*$ ]] || die "option $1 needs a positive integer, got '$2'"; }
@@ -327,7 +327,7 @@ PREFLIGHT_PROBLEMS=0
 problem() { if [ "$DRY_RUN" -eq 1 ]; then warn "$*"; else err "$*"; fi; PREFLIGHT_PROBLEMS=$((PREFLIGHT_PROBLEMS + 1)); }
 
 preflight() {
-  local e svc name pids port mb total=0 avail jars need_mains=() main found ports_tcp ports_udp s m base off
+  local e svc name pids port mb total=0 avail jars need_mains=() missing_mains=() main found ports_tcp ports_udp s m base off
   info "pre-flight checks"
   # already running?
   pids="$(tagged_pids | tr '\n' ' ')"
@@ -336,7 +336,7 @@ preflight() {
   fi
   # runner and distribution
   [ -x "$LMB_RUNNER" ] || problem "runner not executable: $LMB_RUNNER"
-  if [ "$(basename "$LMB_RUNNER")" = lmb-run ]; then
+  if [ "$(basename "$LMB_RUNNER")" = lmb-run ] || [ -n "${LMB_CHECK_MAINS:-}" ]; then
     if [ ! -d "$LMB_LIB" ]; then
       problem "distribution not found at $LMB_LIB: run ./mvnw -DskipTests install"
     else
@@ -350,11 +350,31 @@ preflight() {
           for e in "${jars[@]}"; do
             [ -f "$e" ] && unzip -Z1 "$e" 2>/dev/null | grep -qxF "${main//.//}.class" && { found=1; break; }
           done
-          [ "$found" -eq 1 ] || problem "$main is not in the distribution ($LMB_LIB/lmb-*.jar): module not implemented yet, or dist not rebuilt (./mvnw -DskipTests install). Skip it with --skip <service>."
+          [ "$found" -eq 1 ] || missing_mains+=("$main")
         done
       fi
     fi
     "$LMB_JAVA" -version >/dev/null 2>&1 || problem "no java found ($LMB_JAVA)"
+    # A service whose main class is not built yet is skipped with a message, not a failure
+    # (modules land at different times). Without shard nodes nothing else can work, so that is fatal.
+    if [ "${#missing_mains[@]}" -gt 0 ]; then
+      local -a kept=()
+      for e in "${PLAN[@]}"; do
+        set -- $e
+        if printf '%s\n' "${missing_mains[@]}" | grep -qxF "${LMB_MAIN[$3]}"; then
+          SKIPPED_MISSING+=("$2")
+          [ "$DRY_RUN" -eq 1 ] && kept+=("$e")   # a dry run still shows the command, marked SKIPPED
+        else
+          kept+=("$e")
+        fi
+      done
+      PLAN=("${kept[@]+"${kept[@]}"}")
+      printf '%s\n' "${missing_mains[@]}" | grep -qxF "${LMB_MAIN[node]}" \
+        && problem "${LMB_MAIN[node]} is not in the distribution: nothing can run without shard nodes (./mvnw -DskipTests install)"
+      for main in "${missing_mains[@]}"; do
+        warn "SKIPPING $main: not in the distribution ($LMB_LIB/lmb-*.jar). Its module is not implemented yet or dist was not rebuilt (./mvnw -DskipTests install)."
+      done
+    fi
   fi
   # memory
   for e in "${PLAN[@]}"; do
@@ -427,7 +447,11 @@ if [ "$DRY_RUN" -eq 1 ]; then
       info "tier $tier (wait for LMB_READY, timeout ${TIER_TIMEOUT}s)"
     fi
     write_cmd "$TMP" "$name" "$svc" "$@"
-    echo "  $name   > $(log_file "$name"), pid > $(pid_file "$name")"
+    if printf '%s\n' "${SKIPPED_MISSING[@]+"${SKIPPED_MISSING[@]}"}" | grep -qxF "$name"; then
+      echo "  $name   ${C_YEL}SKIPPED on a real run: ${LMB_MAIN[$svc]} not built yet${C_OFF}"
+    else
+      echo "  $name   > $(log_file "$name"), pid > $(pid_file "$name")"
+    fi
     LMB_DRY_RUN=1 bash "$TMP/$name.sh"
     if [ "$tier" = nodes ] && [ "$name" = "node-$((SHARDS - 1))-$((MEMBERS - 1))" ]; then
       info "then wait up to ${LEADER_TIMEOUT}s for a leader in each shard (methods: ${LMB_LEADER_METHODS:-hook metrics clustertool})"
@@ -444,20 +468,14 @@ rm -f "$LMB_CMD_DIR"/*.sh "$LMB_PID_DIR"/*.pid "$LMB_RUN_DIR/start-order"
 generate_run_config "$LMB_RUN_DIR"
 topo_load "$LMB_TOPO_FILE"
 
-# Scrape targets for the optional Prometheus in deploy/local/docker-compose.yml.
-if command -v python3 >/dev/null 2>&1; then
-  mkdir -p "$LMB_RUN_DIR/prometheus"
-  python3 "$LMB_ROOT/deploy/monitoring/render.py" file-sd --topology "$LMB_TOPO_FILE" \
-    --local-run "$LMB_RUN_DIR/start-order.planned" --out "$LMB_RUN_DIR/prometheus/targets.json" 2>/dev/null || true
-fi
-
 for e in "${PLAN[@]}"; do
   set -- $e; t="$1"; name="$2"; svc="$3"; shift 3
   write_cmd "$LMB_CMD_DIR" "$name" "$svc" "$@"
   echo "$t $name" >> "$LMB_RUN_DIR/start-order"
 done
-cp "$LMB_RUN_DIR/start-order" "$LMB_RUN_DIR/start-order.planned"
+# Scrape targets for the optional Prometheus in deploy/local/docker-compose.yml (file_sd).
 if command -v python3 >/dev/null 2>&1; then
+  mkdir -p "$LMB_RUN_DIR/prometheus"
   python3 "$LMB_ROOT/deploy/monitoring/render.py" file-sd --topology "$LMB_TOPO_FILE" \
     --local-run "$LMB_RUN_DIR/start-order" --out "$LMB_RUN_DIR/prometheus/targets.json" \
     || warn "could not write Prometheus targets (deploy/monitoring/render.py)"
@@ -490,7 +508,7 @@ for tier in $(started_tiers); do
       skipped "node-$s-0" && continue
       start=$SECONDS; leader=""
       while [ $((SECONDS - start)) -lt "$LEADER_TIMEOUT" ]; do
-        if leader="$(shard_leader "$s")"; then break; fi
+        if shard_leader "$s"; then leader="$LMB_LEADER"; break; fi
         leader=""; sleep 1
       done
       if [ -n "$leader" ]; then
@@ -509,6 +527,7 @@ trap - INT TERM
 
 # ---- summary ------------------------------------------------------------------------------------------------------
 info "local venue is up in $((SECONDS - START_ALL))s"
+[ "${#SKIPPED_MISSING[@]}" -gt 0 ] && warn "not started (main class not built yet): ${SKIPPED_MISSING[*]}"
 for name in $(started_names); do
   case "$name" in
     gateway-*)      i="${name#gateway-}"
