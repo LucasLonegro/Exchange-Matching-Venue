@@ -171,6 +171,41 @@ public final class BookBuilder
         return s == null ? 0 : s.lastEventSeq;
     }
 
+    /** eventSeq of the last CommandApplied applied for the shard: the books reflect exactly the events up to it. */
+    public long committedEventSeq(final int shardId)
+    {
+        final ShardStage s = shards.get(shardId);
+        return s == null ? 0 : s.committedEventSeq;
+    }
+
+    /** Shard ids seen so far (or restored). Allocates; not for the hot path. */
+    public int[] shardIds()
+    {
+        final int[] ids = new int[shards.size()];
+        int i = 0;
+        for (final int id : shards.keySet())
+        {
+            ids[i++] = id;
+        }
+        java.util.Arrays.sort(ids);
+        return ids;
+    }
+
+    /** Restore: the next event expected for the shard is committedEventSeq + 1. Only before any event. */
+    void restoreShard(final int shardId, final long committedEventSeq)
+    {
+        final ShardStage stage = new ShardStage(shardId);
+        stage.lastEventSeq = committedEventSeq;
+        stage.committedEventSeq = committedEventSeq;
+        shards.put(shardId, stage);
+    }
+
+    /** Restore: creates (or returns) the symbol so its fields can be filled. Only before any event. */
+    SymbolBook restoreSymbol(final int symbolId, final int shardId)
+    {
+        return symbolFor(symbolId, shardId);
+    }
+
     public long duplicateEvents()
     {
         return duplicateEvents;
@@ -217,6 +252,7 @@ public final class BookBuilder
         {
             output.onBatchEnd(stage.shardId, stage.firstReceiveNanos, timestampNs);
         }
+        stage.committedEventSeq = stage.lastEventSeq;
         stage.reset();
     }
 
@@ -393,6 +429,7 @@ public final class BookBuilder
         final IntArrayList offsets = new IntArrayList();
         int length;
         long lastEventSeq;
+        long committedEventSeq;
         boolean batchOpen;
         long firstReceiveNanos;
 

@@ -6,6 +6,7 @@
   Frame         = uint16 frameLength (little endian, bytes that follow) + one SBE message (messageHeader + body).
   TCP retransmit: the same frames on a stream. Request = one RetransmitRequest frame; response = one
                   RetransmitResponse frame followed by RetransmitResponse.messageCount frames of sequenced messages.
+                  A SnapshotRequest frame is answered the same way, the frames being the symbol's snapshot.
 
   Sequenced messages (templateId 1..9) start their body with SeqHeader. seq is a per-symbol sequence,
   dense from 1, identical on feed A and feed B. See docs/modules/marketdata.md for the rules.
@@ -173,5 +174,10 @@
         <field name="symbolId" id="6" type="uint32"/>
         <field name="messageCount" id="7" type="uint32"/>
         <field name="status" id="8" type="RetransmitStatus"/>
+    </sbe:message>
+
+    <sbe:message name="SnapshotRequest" id="32" description="Current snapshot of one symbol over TCP. Answered with a RetransmitResponse (fromSeq = toSeq = lastSeq = the snapshot's lastSeq) followed by messageCount snapshot frames: SnapshotBegin, SnapshotLevels*, SnapshotEnd">
+        <field name="requestId" id="1" type="int64"/>
+        <field name="symbolId" id="2" type="uint32"/>
     </sbe:message>
 </sbe:messageSchema>

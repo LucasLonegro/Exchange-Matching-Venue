@@ -5,6 +5,7 @@ import io.lmb.marketdata.sbe.MessageHeaderEncoder;
 import io.lmb.marketdata.sbe.RetransmitRequestDecoder;
 import io.lmb.marketdata.sbe.RetransmitResponseEncoder;
 import io.lmb.marketdata.sbe.RetransmitStatus;
+import io.lmb.marketdata.sbe.SnapshotRequestDecoder;
 import io.lmb.marketdata.wire.MdWire;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.slf4j.Logger;
@@ -22,7 +23,10 @@ import java.net.Socket;
 import java.net.SocketException;
 import java.net.SocketTimeoutException;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.function.IntFunction;
 
 /**
  * TCP retransmission service. A client sends RetransmitRequest frames (uint16le length + SBE message);
@@ -43,6 +47,7 @@ public final class RetransmitServer implements AutoCloseable
     private final int maxConnections;
     private final int idleTimeoutMs;
     private final PublisherMetrics metrics;
+    private final IntFunction<CompletableFuture<byte[]>> snapshots;
     private final ServerSocket serverSocket;
     private final Set<Socket> connections = ConcurrentHashMap.newKeySet();
     private final Thread acceptor;
@@ -52,6 +57,19 @@ public final class RetransmitServer implements AutoCloseable
         final InetSocketAddress bind, final RetransmitHistory history, final int maxPerRequest, final int maxConnections,
         final int idleTimeoutMs, final PublisherMetrics metrics) throws IOException
     {
+        this(bind, history, maxPerRequest, maxConnections, idleTimeoutMs, metrics, null);
+    }
+
+    /**
+     * @param snapshots source of a symbol's current snapshot frames (null result = unknown symbol), usually
+     *                  {@link MarketDataEngine#requestSnapshot}; null to refuse SnapshotRequests
+     */
+    public RetransmitServer(
+        final InetSocketAddress bind, final RetransmitHistory history, final int maxPerRequest, final int maxConnections,
+        final int idleTimeoutMs, final PublisherMetrics metrics, final IntFunction<CompletableFuture<byte[]>> snapshots)
+        throws IOException
+    {
+        this.snapshots = snapshots;
         this.history = history;
         this.maxPerRequest = maxPerRequest;
         this.maxConnections = maxConnections;
@@ -99,6 +117,7 @@ public final class RetransmitServer implements AutoCloseable
     {
         final MessageHeaderDecoder header = new MessageHeaderDecoder();
         final RetransmitRequestDecoder request = new RetransmitRequestDecoder();
+        final SnapshotRequestDecoder snapshotRequest = new SnapshotRequestDecoder();
         final MessageHeaderEncoder headerEncoder = new MessageHeaderEncoder();
         final RetransmitResponseEncoder response = new RetransmitResponseEncoder();
         final RetransmitHistory.Range range = new RetransmitHistory.Range();
@@ -123,6 +142,14 @@ public final class RetransmitServer implements AutoCloseable
                     return;
                 }
                 header.wrap(inBuffer, 0);
+                if (header.schemaId() == MdWire.SCHEMA_ID && header.templateId() == SnapshotRequestDecoder.TEMPLATE_ID
+                    && snapshots != null && len >= MdWire.HEADER_LENGTH + header.blockLength())
+                {
+                    snapshotRequest.wrap(inBuffer, MdWire.HEADER_LENGTH, header.blockLength(), header.version());
+                    serveSnapshot(snapshotRequest.requestId(), (int)snapshotRequest.symbolId(), outBuffer, response,
+                        headerEncoder, os);
+                    continue;
+                }
                 if (header.schemaId() != MdWire.SCHEMA_ID || header.templateId() != RetransmitRequestDecoder.TEMPLATE_ID
                     || len < MdWire.HEADER_LENGTH + header.blockLength())
                 {
@@ -205,6 +232,56 @@ public final class RetransmitServer implements AutoCloseable
         {
             connections.remove(socket);
         }
+    }
+
+    private void serveSnapshot(
+        final long requestId, final int symbolId, final UnsafeBuffer out, final RetransmitResponseEncoder response,
+        final MessageHeaderEncoder headerEncoder, final OutputStream os) throws IOException
+    {
+        byte[] frames;
+        try
+        {
+            frames = snapshots.apply(symbolId).get(5, TimeUnit.SECONDS);
+        }
+        catch (final Exception e)
+        {
+            throw new IOException("snapshot unavailable: " + e, e);
+        }
+        final RetransmitHistory.SymbolHistory h = history.get(symbolId);
+        int count = 0;
+        long lastSeq = 0;
+        if (frames != null)
+        {
+            final UnsafeBuffer f = new UnsafeBuffer(frames);
+            // SnapshotBegin.lastSeq is the first body field of the first frame.
+            lastSeq = f.getLong(MdWire.FRAME_PREFIX_LENGTH + MdWire.HEADER_LENGTH, MdWire.ORDER);
+            for (int pos = 0; pos < frames.length; pos += MdWire.FRAME_PREFIX_LENGTH + MdWire.frameLength(f, pos))
+            {
+                count++;
+            }
+            metrics.snapshotsSent.incrementAndGet();
+        }
+        else
+        {
+            metrics.retransmitUnknown.incrementAndGet();
+        }
+        final int head = MdWire.FRAME_PREFIX_LENGTH + MdWire.HEADER_LENGTH + RetransmitResponseEncoder.BLOCK_LENGTH;
+        MdWire.putFrameLength(out, 0, MdWire.HEADER_LENGTH + RetransmitResponseEncoder.BLOCK_LENGTH);
+        response.wrapAndApplyHeader(out, MdWire.FRAME_PREFIX_LENGTH, headerEncoder)
+            .requestId(requestId)
+            .fromSeq(lastSeq)
+            .toSeq(lastSeq)
+            .oldestAvailableSeq(h == null ? 0 : h.oldestSeq())
+            .lastSeq(lastSeq)
+            .symbolId(symbolId)
+            .messageCount(count)
+            .status(frames == null ? RetransmitStatus.UNKNOWN_SYMBOL : RetransmitStatus.OK);
+        os.write(out.byteArray(), 0, head);
+        if (frames != null)
+        {
+            os.write(frames);
+        }
+        os.flush();
     }
 
     private static void readFully(final InputStream is, final byte[] dst, final int offset, final int length) throws IOException

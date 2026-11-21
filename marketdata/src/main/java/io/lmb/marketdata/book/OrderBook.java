@@ -71,15 +71,22 @@ public final class OrderBook
 
     public void copyFrom(final OrderBook other)
     {
+        copyTop(other, 0);
+    }
+
+    /** Copies the best {@code depth} levels per side of other (0 = all). */
+    public void copyTop(final OrderBook other, final int depth)
+    {
         for (int s = 0; s < 2; s++)
         {
             final Ladder src = other.sides[s];
             final Ladder dst = sides[s];
-            dst.ensure(src.size);
-            System.arraycopy(src.prices, 0, dst.prices, 0, src.size);
-            System.arraycopy(src.quantities, 0, dst.quantities, 0, src.size);
-            System.arraycopy(src.counts, 0, dst.counts, 0, src.size);
-            dst.size = src.size;
+            final int n = depth > 0 ? Math.min(depth, src.size) : src.size;
+            dst.ensure(n);
+            System.arraycopy(src.prices, 0, dst.prices, 0, n);
+            System.arraycopy(src.quantities, 0, dst.quantities, 0, n);
+            System.arraycopy(src.counts, 0, dst.counts, 0, n);
+            dst.size = n;
         }
     }
 
