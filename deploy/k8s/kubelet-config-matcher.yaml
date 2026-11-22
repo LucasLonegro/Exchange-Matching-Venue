@@ -1,0 +1,28 @@
+# KubeletConfiguration for the matcher and edge node pools (merge into the node pool's kubelet config;
+# changing cpuManagerPolicy requires draining the node and deleting /var/lib/kubelet/cpu_manager_state).
+# Together with Guaranteed pods requesting integer CPUs this gives each latency-critical container
+# exclusive cores on one NUMA node. The host must still be tuned (deploy/baremetal/host-tuning.sh):
+# isolcpus/nohz_full for the cores listed here as allocatable, IRQs on the reserved cores.
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+cpuManagerPolicy: static
+cpuManagerPolicyOptions:
+  full-pcpus-only: "true"          # whole physical cores: no sibling hyperthread shared with another pod
+  distribute-cpus-across-numa: "false"
+reservedSystemCPUs: "0-1,32-33"    # housekeeping cores (and their siblings): kubelet, OS, IRQs
+topologyManagerPolicy: single-numa-node
+topologyManagerScope: pod
+memoryManagerPolicy: Static
+reservedMemory:
+  - numaNode: 0
+    limits:
+      memory: 5Gi            # must equal kubeReserved + systemReserved + evictionHard (2+2+1)
+kubeReserved:
+  memory: 2Gi
+systemReserved:
+  memory: 2Gi
+evictionHard:
+  memory.available: 1Gi
+  nodefs.available: 10%
+featureGates:
+  SidecarContainers: true          # GA in 1.33; native sidecar for the Aeron media driver

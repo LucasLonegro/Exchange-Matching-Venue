@@ -1,0 +1,26 @@
+{
+  "_comment": "Input of deploy/k8s/render.py (with deploy/prod/site.json for shard count and zones). Resources are per pod; requests = limits everywhere latency matters (Guaranteed QoS, exclusive cores with the static CPU manager).",
+  "namespace": "lmb",
+  "clusterDomain": "cluster.local",
+  "externalDomain": "k8s.p.lmb.internal",
+  "image": "registry.lmb.internal/lmb:0.1.0",
+  "aeronmdImage": "registry.lmb.internal/lmb-aeronmd:1.54.2",
+  "statefulSetPerMember": false,
+  "storageClass": "local-nvme",
+  "secretName": "lmb-secrets",
+  "node": {
+    "pool": "matcher",
+    "cpu": 8, "memory": "48Gi", "hugepages2Mi": "16Gi", "heap": "24g",
+    "driverCpu": 3, "driverMemory": "2Gi", "shmSize": "8Gi",
+    "storage": "1700Gi",
+    "pin": "clustered-service=2 consensus-module=3 archive-recorder=4 archive-replayer=5",
+    "env": {"LMB_CLUSTER_FILESYNCLEVEL": "1", "LMB_ARCHIVE_FILESYNCLEVEL": "1", "LMB_CLUSTER_IDLE": "noop", "LMB_DRIVER_THREADING": "DEDICATED"}
+  },
+  "gateway":      {"replicas": 4, "pool": "edge", "cpu": 6, "memory": "16Gi", "heap": "8g", "driverCpu": 2, "storage": "200Gi", "hostNetwork": true, "zone": "leader"},
+  "marketdata":   {"replicas": 2, "pool": "edge", "cpu": 6, "memory": "16Gi", "heap": "8g", "driverCpu": 2, "hostNetwork": true, "zone": "leader"},
+  "consolidator": {"replicas": 2, "pool": "edge", "cpu": 4, "memory": "8Gi", "heap": "4g", "driverCpu": 2, "hostNetwork": true, "zone": "leader"},
+  "controlplane": {"replicas": 2, "pool": "general", "cpu": 2, "memory": "4Gi", "heap": "2g", "hostNetwork": false, "zone": "spread"},
+  "posttrade":    {"replicas": 2, "pool": "general", "cpu": 4, "memory": "8Gi", "heap": "4g", "storage": "100Gi", "storageClass": "standard-ssd", "hostNetwork": false, "zone": "spread"},
+  "replayer":     {"pool": "general", "cpu": 2, "memory": "8Gi", "heap": "4g", "hostNetwork": false, "zone": "last"},
+  "backup":       {"pool": "dr", "cpu": 2, "memory": "8Gi", "heap": "2g", "storage": "1700Gi", "hostNetwork": true}
+}
