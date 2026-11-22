@@ -1,0 +1,11 @@
+# All LMB processes of this host. Enable the instances this host runs, e.g.
+#   systemctl enable lmb@node-3-0.service lmb@node-11-0.service
+#   systemctl start lmb.target
+# Cross-host start order (nodes, leaders, control plane, ...) is the start-of-day runbook's job.
+[Unit]
+Description=LMB venue processes on this host
+Wants=lmb-ptp4l.service lmb-phc2sys.service
+After=lmb-phc2sys.service
+
+[Install]
+WantedBy=multi-user.target

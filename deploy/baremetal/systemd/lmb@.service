@@ -1,0 +1,43 @@
+# One LMB process: lmb@<service>-<id>.service, e.g. lmb@node-3-0, lmb@gateway-1, lmb@replayer-7.
+# Configuration: /etc/lmb/lmb.env, /etc/lmb/<service>.env, /etc/lmb/instances/<service>-<id>.env
+# (read by /opt/lmb/bin/lmb-service). `systemctl start` returns once the process printed LMB_READY.
+[Unit]
+Description=LMB %i
+Documentation=file:///opt/lmb/docs/operations.md
+# The process attaches to its own Aeron C media driver; if the driver stops, so does the process.
+BindsTo=lmb-aeronmd@%i.service
+After=lmb-aeronmd@%i.service network-online.target time-sync.target
+Wants=network-online.target time-sync.target
+PartOf=lmb.target
+# A deterministic bug crashes every member of a shard on the same log entry: restart at most 3 times
+# in 10 minutes, then stay down and page (a restart loop helps nobody).
+StartLimitIntervalSec=600
+StartLimitBurst=3
+
+[Service]
+Type=exec
+User=lmb
+Group=lmb
+ExecStart=/opt/lmb/bin/lmb-service %i
+# '+': needs to read the journal of this invocation.
+ExecStartPost=+/opt/lmb/bin/lmb-wait-ready %i 600
+TimeoutStartSec=660
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=60
+LimitNOFILE=1048576
+LimitMEMLOCK=infinity
+AmbientCapabilities=CAP_IPC_LOCK CAP_SYS_NICE
+CapabilityBoundingSet=CAP_IPC_LOCK CAP_SYS_NICE
+NoNewPrivileges=yes
+OOMScoreAdjust=-900
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/lmb /var/log/lmb /dev/shm
+SyslogIdentifier=lmb-%i
+
+[Install]
+WantedBy=lmb.target

@@ -1,0 +1,19 @@
+# linuxptp ptp4l: disciplines the PTP NIC's hardware clock (PHC) from the grandmasters.
+[Unit]
+Description=PTP (ptp4l) for LMB
+After=network-online.target
+Wants=network-online.target
+Before=time-sync.target
+Wants=time-sync.target
+Conflicts=chronyd.service chrony.service ntpd.service systemd-timesyncd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/ptp4l -f /etc/lmb/ptp/ptp4l.conf
+Restart=always
+RestartSec=2
+CPUAffinity=0
+Nice=-10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,19 @@
+# linuxptp phc2sys: steers CLOCK_REALTIME from the PHC that ptp4l disciplines (automatic mode follows
+# ptp4l's port state). -n must equal ptp4l's domainNumber; -w waits for ptp4l (UTC offset known).
+[Unit]
+Description=PHC to system clock (phc2sys) for LMB
+Requires=lmb-ptp4l.service
+After=lmb-ptp4l.service
+Before=time-sync.target
+Wants=time-sync.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/phc2sys -a -r -n 24 -w -u 60 -m
+Restart=always
+RestartSec=2
+CPUAffinity=0
+Nice=-10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,15 @@
+# Publishes the PTP offset for node_exporter's textfile collector (lmb_host_ptp_offset_ns).
+[Unit]
+Description=LMB PTP offset exporter
+After=lmb-ptp4l.service
+Wants=lmb-ptp4l.service
+
+[Service]
+Type=simple
+ExecStart=/opt/lmb/bin/lmb-ptp-exporter --dir /var/lib/node_exporter/textfile --interval 1
+Restart=always
+RestartSec=5
+CPUAffinity=0
+
+[Install]
+WantedBy=multi-user.target
