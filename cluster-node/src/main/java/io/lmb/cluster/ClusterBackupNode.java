@@ -15,6 +15,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Aeron {@link ClusterBackup} for one shard, with its own embedded driver and Archive. It periodically
@@ -43,6 +44,20 @@ public final class ClusterBackupNode implements AutoCloseable
     }
 
     public static ClusterBackupNode launch(final NodeConfig config, final String host, final int basePort)
+    {
+        return launch(config, host, basePort, ctx -> {});
+    }
+
+    /**
+     * Launches with {@code customizer} applied to the ClusterBackup context last (tests shorten timings).
+     * Keys: {@code lmb.backup.coolDownMs} (default 5000; Aeron's 30 s would idle that long after every
+     * reset, e.g. each time the leader answers a FOLLOWER-sourced query), {@code lmb.backup.queryIntervalSec}
+     * (default 3600; how often new snapshots are fetched, the live log is followed continuously),
+     * {@code lmb.backup.progressTimeoutMs} (default 10000).
+     */
+    public static ClusterBackupNode launch(
+        final NodeConfig config, final String host, final int basePort,
+        final java.util.function.Consumer<ClusterBackup.Context> customizer)
     {
         final Topology t = config.topology;
         final int shard = config.shardId;
@@ -96,10 +111,54 @@ public final class ClusterBackupNode implements AutoCloseable
                 .controlResponseChannel(localControl))
             .credentialsSupplier(SharedSecret.credentials(config.clusterSecret))
             .sourceType(ClusterBackup.SourceType.valueOf(t.get("lmb.backup.sourceType", "FOLLOWER").trim().toUpperCase()))
+            .eventsListener(new LoggingListener(shard))
+            .clusterBackupCoolDownIntervalNs(TimeUnit.MILLISECONDS.toNanos(t.getLong("lmb.backup.coolDownMs", 5000)))
+            .clusterBackupIntervalNs(TimeUnit.SECONDS.toNanos(t.getLong("lmb.backup.queryIntervalSec", 3600)))
+            .clusterBackupProgressTimeoutNs(TimeUnit.MILLISECONDS.toNanos(t.getLong("lmb.backup.progressTimeoutMs", 10000)))
             .errorHandler(errorHandler);
+        customizer.accept(backupCtx);
         final ClusterBackupMediaDriver backup = ClusterBackupMediaDriver.launch(driverCtx, archiveCtx, backupCtx);
         LOG.info("cluster backup for shard {} started: consensus={} dir={}", shard, consensus, dir);
         return new ClusterBackupNode(backup, shard);
+    }
+
+    /** Logs the backup's progress; failures at WARN (the agent resets and retries after them). */
+    private record LoggingListener(int shard) implements io.aeron.cluster.ClusterBackupEventsListener
+    {
+        @Override
+        public void onBackupQuery()
+        {
+            LOG.debug("backup shard {}: query", shard);
+        }
+
+        @Override
+        public void onPossibleFailure(final Exception ex)
+        {
+            LOG.warn("backup shard {}: possible failure, resetting: {}", shard, ex.toString());
+        }
+
+        @Override
+        public void onBackupResponse(
+            final io.aeron.cluster.ClusterMember[] members, final io.aeron.cluster.ClusterMember logSource,
+            final java.util.List<io.aeron.cluster.RecordingLog.Snapshot> snapshotsToRetrieve)
+        {
+            LOG.info("backup shard {}: response, log source member {} archive {}, {} snapshot(s) to retrieve",
+                shard, logSource.id(), logSource.archiveEndpoint(), snapshotsToRetrieve.size());
+        }
+
+        @Override
+        public void onUpdatedRecordingLog(
+            final io.aeron.cluster.RecordingLog recordingLog,
+            final java.util.List<io.aeron.cluster.RecordingLog.Snapshot> snapshotsRetrieved)
+        {
+            LOG.info("backup shard {}: recording log updated, {} snapshot(s) retrieved", shard, snapshotsRetrieved.size());
+        }
+
+        @Override
+        public void onLiveLogProgress(final long recordingId, final long recordingPosCounterId, final long logPosition)
+        {
+            LOG.debug("backup shard {}: live log recording {} at {}", shard, recordingId, logPosition);
+        }
     }
 
     public int shardId()
