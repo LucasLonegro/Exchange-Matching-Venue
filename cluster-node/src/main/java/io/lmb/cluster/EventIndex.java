@@ -19,6 +19,8 @@ public final class EventIndex
         final long firstSeq;
         private volatile long lastSeq;
         private volatile boolean live;
+        /** Epoch ms when the segment's recording stopped (0 while live). */
+        private volatile long stopTimestampMs;
         /** pairs (seq, position), ascending. */
         private volatile long[] entries = new long[64];
         private volatile int count;
@@ -59,7 +61,18 @@ public final class EventIndex
 
         void stop()
         {
+            stop(System.currentTimeMillis());
+        }
+
+        void stop(final long stopTimestampMs)
+        {
+            this.stopTimestampMs = stopTimestampMs;
             live = false;
+        }
+
+        public long stopTimestampMs()
+        {
+            return stopTimestampMs;
         }
 
         /** Single writer. Entries must be added with increasing seq. */
@@ -151,6 +164,13 @@ public final class EventIndex
         final Segment[] next = Arrays.copyOf(old, old.length + 1);
         next[old.length] = s;
         segments = next;
+    }
+
+    /** Drops the n oldest segments (retention). Single writer. */
+    void removeOldest(final int n)
+    {
+        final Segment[] old = segments;
+        segments = Arrays.copyOfRange(old, Math.min(n, old.length), old.length);
     }
 
     void ready(final boolean ready)

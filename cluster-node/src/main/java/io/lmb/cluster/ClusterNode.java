@@ -174,7 +174,7 @@ public final class ClusterNode implements AutoCloseable
         aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(aeronDir).clientName("lmb-node-" + name)
             .errorHandler(errorHandler));
         store = new EventStore(aeron, localArchive.clone().aeron(aeron).ownsAeronClient(false), eventsDir.toPath(),
-            config.eventsTermLength, config.eventIndexInterval, index, Idle.of(config.idleStrategy));
+            config.eventsTermLength, config.eventIndexInterval, index, Idle.of(config.idleStrategy), config.eventRetention);
         service = new ShardClusteredService(machine, store, index, config.memberId);
 
         container = ClusteredServiceContainer.launch(new ClusteredServiceContainer.Context()

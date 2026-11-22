@@ -60,6 +60,11 @@ public final class EventStore implements AutoCloseable
     private final int indexInterval;
     private final EventIndex index;
     private final IdleStrategy idle;
+    private final EventRetention retention;
+    /** Segments hidden from the index by retention whose recording is not purged yet (oldest first). */
+    private final List<EventIndex.Segment> pendingPurge = new ArrayList<>();
+    private long nextRetentionNs;
+    private volatile long purgedCount;
     private final ByteBuffer entryBuffer = ByteBuffer.allocateDirect(16).order(ByteOrder.LITTLE_ENDIAN);
 
     private AeronArchive archive;
@@ -75,6 +80,14 @@ public final class EventStore implements AutoCloseable
         final Aeron aeron, final AeronArchive.Context archiveContext, final Path dir, final int termLength,
         final int indexInterval, final EventIndex index, final IdleStrategy idle)
     {
+        this(aeron, archiveContext, dir, termLength, indexInterval, index, idle, EventRetention.NONE);
+    }
+
+    public EventStore(
+        final Aeron aeron, final AeronArchive.Context archiveContext, final Path dir, final int termLength,
+        final int indexInterval, final EventIndex index, final IdleStrategy idle, final EventRetention retention)
+    {
+        this.retention = retention;
         this.aeron = aeron;
         this.archiveContext = archiveContext;
         this.dir = dir;
@@ -182,6 +195,100 @@ public final class EventStore implements AutoCloseable
         segment.lastSeq(seq);
     }
 
+    /** Total segments purged by retention since start (counted once segments.dat no longer lists them). */
+    public long purgedCount()
+    {
+        return purgedCount;
+    }
+
+    /** Applies the retention policy every {@code retention.intervalNs()}; called from the service thread. */
+    public int maintain(final long nowNs)
+    {
+        if (archive == null || publication == null || !retention.enabled() || nowNs - nextRetentionNs < 0)
+        {
+            return 0;
+        }
+        nextRetentionNs = nowNs + retention.intervalNs();
+        return applyRetention(System.currentTimeMillis());
+    }
+
+    /**
+     * Hides the segments selected by the policy from the index (new requests for their events get TOO_OLD),
+     * then purges their recordings. A recording with an active replay cannot be purged; it is retried on
+     * the next pass. segments.dat keeps a segment until its recording is purged, so a crash in between
+     * only means the segment is selected again after restart.
+     */
+    int applyRetention(final long nowMs)
+    {
+        final EventIndex.Segment[] all = index.segments();
+        final int closed = all.length > 0 && all[all.length - 1].isLive() ? all.length - 1 : all.length;
+        final long[] stops = new long[closed];
+        for (int i = 0; i < closed; i++)
+        {
+            stops[i] = all[i].stopTimestampMs();
+        }
+        final int hide = retention.purgeCount(stops, closed, nowMs);
+        if (hide > 0)
+        {
+            index.removeOldest(hide);
+            for (int i = 0; i < hide; i++)
+            {
+                pendingPurge.add(all[i]);
+            }
+            LOG.info("event retention: hiding {} segment(s), first available eventSeq now {}", hide, index.firstSeq());
+        }
+        int purged = 0;
+        while (!pendingPurge.isEmpty())
+        {
+            final EventIndex.Segment s = pendingPurge.get(0);
+            try
+            {
+                archive.purgeRecording(s.recordingId());
+            }
+            catch (final io.aeron.archive.client.ArchiveException e)
+            {
+                if (e.errorCode() != io.aeron.archive.client.ArchiveException.UNKNOWN_RECORDING)
+                {
+                    LOG.info("event segment recording {} not purged yet ({}); retrying later", s.recordingId(), e.getMessage());
+                    break;
+                }
+            }
+            pendingPurge.remove(0);
+            purged++;
+            try
+            {
+                Files.deleteIfExists(dir.resolve("seg-" + s.recordingId() + ".idx"));
+            }
+            catch (final IOException e)
+            {
+                LOG.warn("cannot delete index of purged segment {}: {}", s.recordingId(), e.toString());
+            }
+            LOG.info("event retention: purged segment recording {} (eventSeq {}..{})", s.recordingId(), s.firstSeq(), s.lastSeq());
+        }
+        if (purged > 0)
+        {
+            final List<long[]> records = new ArrayList<>();
+            for (final EventIndex.Segment s : pendingPurge)
+            {
+                records.add(new long[]{ s.recordingId(), s.firstSeq() });
+            }
+            for (final EventIndex.Segment s : index.segments())
+            {
+                records.add(new long[]{ s.recordingId(), s.firstSeq() });
+            }
+            try
+            {
+                writeSegmentsFile(records);
+            }
+            catch (final IOException e)
+            {
+                LOG.error("cannot rewrite segments.dat after purge (purged segments are dropped on next start)", e);
+            }
+            purgedCount += purged;
+        }
+        return hide + purged;
+    }
+
     private void writeEntry(final long seq, final long position)
     {
         try
@@ -237,6 +344,10 @@ public final class EventStore implements AutoCloseable
             StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING);
 
         final List<long[]> records = new ArrayList<>();
+        for (final EventIndex.Segment s : pendingPurge)
+        {
+            records.add(new long[]{ s.recordingId(), s.firstSeq() });
+        }
         for (final EventIndex.Segment s : existing)
         {
             records.add(new long[]{ s.recordingId(), s.firstSeq() });
@@ -281,7 +392,7 @@ public final class EventStore implements AutoCloseable
         {
             final long recordingId = b.getLong();
             final long firstSeq = b.getLong();
-            final long[] extent = new long[]{ AeronArchive.NULL_POSITION, AeronArchive.NULL_POSITION };
+            final long[] extent = new long[]{ AeronArchive.NULL_POSITION, AeronArchive.NULL_POSITION, 0 };
             final int found = archive.listRecording(recordingId,
                 (controlSessionId, correlationId, rid, startTimestamp, stopTimestamp, startPosition, stopPosition,
                 initialTermId, segmentFileLength, termBufferLength, mtuLength, sessionId, streamId, strippedChannel,
@@ -289,6 +400,7 @@ public final class EventStore implements AutoCloseable
                 {
                     extent[0] = startPosition;
                     extent[1] = stopPosition;
+                    extent[2] = stopTimestamp;
                 });
             if (found == 0 || extent[1] == AeronArchive.NULL_POSITION)
             {
@@ -329,6 +441,7 @@ public final class EventStore implements AutoCloseable
                 continue;
             }
             s.lastSeq(last);
+            s.stop(extent[2]);
             previousLast = last;
             result.add(s);
             LOG.info("event segment recording {}: eventSeq {}..{}", recordingId, firstSeq, last);

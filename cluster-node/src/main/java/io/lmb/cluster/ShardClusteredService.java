@@ -249,6 +249,12 @@ public final class ShardClusteredService implements ClusteredService, TimerSched
     }
 
     @Override
+    public int doBackgroundWork(final long nowNs)
+    {
+        return store.maintain(nowNs);
+    }
+
+    @Override
     public void onTerminate(final Cluster cluster)
     {
         store.close();

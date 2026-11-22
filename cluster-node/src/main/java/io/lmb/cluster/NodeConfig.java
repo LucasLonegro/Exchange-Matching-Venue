@@ -56,6 +56,9 @@ public final class NodeConfig
     public long eventSessionTimeoutNs = TimeUnit.SECONDS.toNanos(10);
     public int eventMaxSessions = 256;
 
+    /** Event segment retention (closed segments only); see {@link EventRetention}. */
+    public EventRetention eventRetention = EventRetention.NONE;
+
     /** Prometheus endpoint; false disables it. */
     public boolean metricsEnabled = true;
 
@@ -90,6 +93,10 @@ public final class NodeConfig
         c.eventHeartbeatIntervalNs = ms(t.getLong("lmb.events.serverHeartbeatMs", 250));
         c.eventSessionTimeoutNs = ms(t.getLong("lmb.events.sessionTimeoutMs", 10000));
         c.eventMaxSessions = t.getInt("lmb.events.maxSessions", 256);
+        c.eventRetention = new EventRetention(
+            t.getInt("lmb.events.retention.maxSegments", 0),
+            TimeUnit.SECONDS.toMillis(t.getLong("lmb.events.retention.maxAgeSec", 0)),
+            TimeUnit.SECONDS.toNanos(t.getLong("lmb.events.retention.intervalSec", 60)));
         c.metricsEnabled = t.getBool("lmb.cluster.metrics.enabled", true);
         return c;
     }
