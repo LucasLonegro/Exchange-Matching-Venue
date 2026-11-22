@@ -118,6 +118,28 @@ public final class MarketDataPublisher implements AutoCloseable
         }
     }
 
+    /**
+     * Waits until every shard's event stream has caught up with its live edge (see
+     * {@link MarketDataEngine#isCaughtUp}). Returns false on timeout; throws if the publisher thread failed.
+     */
+    public boolean awaitReady(final long timeoutMs) throws InterruptedException
+    {
+        final long deadline = System.currentTimeMillis() + timeoutMs;
+        while (!engine.isCaughtUp())
+        {
+            if (failure != null || stopped.getCount() == 0)
+            {
+                throw new IllegalStateException("publisher stopped before it caught up", failure);
+            }
+            if (System.currentTimeMillis() > deadline)
+            {
+                return false;
+            }
+            Thread.sleep(5);
+        }
+        return true;
+    }
+
     /** Null while healthy. */
     public Throwable failure()
     {

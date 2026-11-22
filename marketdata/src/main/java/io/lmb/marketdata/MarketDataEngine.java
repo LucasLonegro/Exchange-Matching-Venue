@@ -16,6 +16,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLongArray;
 
 /**
  * The publisher thread: polls every shard's event stream into the {@link BookBuilder} and fans each
@@ -46,9 +47,12 @@ public final class MarketDataEngine implements BookBuilder.Output, AutoCloseable
     private final ExecutorService checkpointWriter;
 
     private EventStreamClient[] streams;
-    /** Per shard: still in the start-up catch-up phase / currently not multicasting because of it. */
-    private boolean[] startingUp;
+    /** Per shard: caught up with the live edge once / currently not multicasting because of a start-up backlog. */
+    private boolean[] caughtUp;
     private boolean[] suppress;
+    private volatile int shardsCaughtUp;
+    /** Per shard: last eventSeq consumed, published for other threads (metrics, logs). */
+    private final AtomicLongArray lastSeqs;
     private int currentShard;
     private long nowNs;
     private long pollNanos;
@@ -80,7 +84,8 @@ public final class MarketDataEngine implements BookBuilder.Output, AutoCloseable
         this.metrics = metrics;
         this.checkpointWriter = config.dataDir == null ? null : Executors.newSingleThreadExecutor(
             r -> Thread.ofPlatform().daemon(true).name("md-checkpoint").unstarted(r));
-        metrics.bindEngine(() -> builder.sortedSymbolIds().size(), builder::lastEventSeq, config.shards);
+        this.lastSeqs = new AtomicLongArray(config.shards);
+        metrics.bindEngine(() -> builder.sortedSymbolIds().size(), lastSeqs::get, config.shards);
     }
 
     public BookBuilder builder()
@@ -93,13 +98,13 @@ public final class MarketDataEngine implements BookBuilder.Output, AutoCloseable
     {
         final boolean restored = config.dataDir != null && StateCheckpoint.restore(config.dataDir, builder, config.sessionId);
         streams = new EventStreamClient[config.shards];
-        startingUp = new boolean[config.shards];
+        caughtUp = new boolean[config.shards];
         suppress = new boolean[config.shards];
         for (int shard = 0; shard < config.shards; shard++)
         {
             final long from = builder.committedEventSeq(shard);
             streams[shard] = venue.eventStream(shard, from);
-            startingUp[shard] = config.suppressCatchUp;
+            lastSeqs.set(shard, from);
             LOG.info("shard {}: reading events after eventSeq {}{}", shard, from, restored ? " (checkpoint)" : "");
         }
         if (fanout != null)
@@ -113,8 +118,40 @@ public final class MarketDataEngine implements BookBuilder.Output, AutoCloseable
         }
     }
 
+    /**
+     * Any thread: true once every shard's stream has connected and reached its live edge at least once
+     * (stays true across later reconnects). The process prints its READY line on this.
+     */
+    public boolean isCaughtUp()
+    {
+        return streams != null && shardsCaughtUp == streams.length;
+    }
+
+    /** Any thread: last eventSeq consumed per shard, for logs. */
+    public String lastEventSeqs()
+    {
+        return lastSeqs.toString();
+    }
+
     /** One duty cycle; returns the amount of work done. */
     public int doWork(final long nowNs)
+    {
+        if (failed)
+        {
+            throw new IllegalStateException("engine stopped");
+        }
+        try
+        {
+            return duty(nowNs);
+        }
+        catch (final Throwable t)
+        {
+            failed = true; // state may sit mid-batch or past a gap: no further checkpoint from it
+            throw t;
+        }
+    }
+
+    private int duty(final long nowNs)
     {
         this.nowNs = nowNs;
         int work = 0;
@@ -126,23 +163,29 @@ public final class MarketDataEngine implements BookBuilder.Output, AutoCloseable
             final int n = streams[shard].poll(handler, config.pollLimit);
             if (builder.eventGaps() != gapsBefore)
             {
-                failed = true;
                 throw new IllegalStateException("shard " + shard + " event stream is not contiguous with this publisher's "
                     + "state; refusing to publish inconsistent md_seq (see docs/modules/marketdata.md, Restart)");
             }
-            if (startingUp[shard])
+            if (!caughtUp[shard])
             {
-                // The first poll is always multicast; while later polls come back full the backlog is not.
-                if (n < config.pollLimit)
+                // Start-up: the first full poll is multicast; while later polls come back full the backlog is
+                // not (suppressCatchUp). Caught up = the stream is connected and a poll came back short. A
+                // stream still connecting (polls return 0) is not caught up.
+                if (n >= config.pollLimit)
                 {
-                    startingUp[shard] = false;
+                    suppress[shard] = config.suppressCatchUp;
+                }
+                else if (streams[shard].isConnected())
+                {
+                    caughtUp[shard] = true;
                     suppress[shard] = false;
+                    shardsCaughtUp = shardsCaughtUp + 1; // only this thread writes
                     LOG.info("shard {} caught up at eventSeq {}", shard, builder.lastEventSeq(shard));
                 }
-                else
-                {
-                    suppress[shard] = true;
-                }
+            }
+            if (n > 0)
+            {
+                lastSeqs.lazySet(shard, builder.lastEventSeq(shard));
             }
             work += n;
         }
@@ -312,10 +355,14 @@ public final class MarketDataEngine implements BookBuilder.Output, AutoCloseable
         }
     }
 
-    /** Writes a final checkpoint (publisher thread) and releases the streams. */
+    /**
+     * Writes a final checkpoint (publisher thread) and releases the streams. After a failure no checkpoint is
+     * written: the last periodic one, taken from consistent state, is what a restart resumes from.
+     */
     @Override
     public void close()
     {
+        final boolean healthy = !failed;
         failed = true;
         SnapshotRequest r;
         while ((r = snapshotRequests.poll()) != null)
@@ -324,7 +371,7 @@ public final class MarketDataEngine implements BookBuilder.Output, AutoCloseable
         }
         if (checkpointWriter != null)
         {
-            if (streams != null)
+            if (streams != null && healthy)
             {
                 final byte[] data = StateCheckpoint.serialize(builder, config.sessionId);
                 checkpointWriter.execute(() -> writeCheckpoint(data));
