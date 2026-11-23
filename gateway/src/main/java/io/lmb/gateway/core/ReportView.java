@@ -14,12 +14,12 @@ public final class ReportView
 {
     private final MessageHeaderDecoder header = new MessageHeaderDecoder();
     private final ExecutionReportDecoder decoder = new ExecutionReportDecoder();
-    private final SymbolDirectory symbols;
+    private final LiveSymbols symbols;
     private DirectBuffer buffer;
     private int offset;
     private int length;
 
-    public ReportView(final SymbolDirectory symbols)
+    public ReportView(final LiveSymbols symbols)
     {
         this.symbols = symbols;
     }

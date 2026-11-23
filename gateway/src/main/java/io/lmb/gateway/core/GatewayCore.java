@@ -102,7 +102,7 @@ public final class GatewayCore implements Agent
 
     private final GatewayConfig cfg;
     private final VenueClients venue;
-    private final SymbolDirectory symbols;
+    private final LiveSymbols symbols;
     private final FirmDirectory firms;
     private final GatewayMetrics metrics;
     private final EpochNanoClock epochClock = new OffsetEpochNanoClock();
@@ -147,11 +147,11 @@ public final class GatewayCore implements Agent
     {
         this.cfg = cfg;
         this.venue = venue;
-        this.symbols = symbols;
+        this.symbols = new LiveSymbols(symbols);
         this.firms = firms;
         this.metrics = metrics;
         this.orderCache = new OrderCache(cfg.orderCacheMax);
-        this.reportView = new ReportView(symbols);
+        this.reportView = new ReportView(this.symbols);
         final int n = venue.shardCount();
         this.shards = new ShardChannel[n];
         this.liveHandlers = new LiveHandler[n];
@@ -186,7 +186,7 @@ public final class GatewayCore implements Agent
         return cfg;
     }
 
-    public SymbolDirectory symbols()
+    public LiveSymbols symbols()
     {
         return symbols;
     }
@@ -1114,6 +1114,8 @@ public final class GatewayCore implements Agent
                 {
                     sdDecoder.wrapAndApplyHeader(buffer, offset, headerDecoder);
                     symbolStates.put((int)sdDecoder.symbolId(), sdDecoder.state().name());
+                    symbols.onDefined(ch.shardId, (int)sdDecoder.symbolId(), sdDecoder.ticker().trim(), sdDecoder.tickSize(),
+                        sdDecoder.lotSize(), sdDecoder.referencePrice(), (int)sdDecoder.priceBandBps(), sdDecoder.maxOrderQty());
                 }
                 default ->
                 {
