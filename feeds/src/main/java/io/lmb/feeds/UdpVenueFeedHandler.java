@@ -89,7 +89,6 @@ public final class UdpVenueFeedHandler implements VenueFeedHandler
                 {
                     final DatagramChannel ch = DatagramChannel.open(StandardProtocolFamily.INET);
                     channels[v * 2 + line] = ch;
-                    ch.setOption(StandardSocketOptions.SO_REUSEADDR, true);
                     ch.setOption(StandardSocketOptions.SO_RCVBUF, SOCKET_RECEIVE_BUFFER);
                     ch.bind(new InetSocketAddress(bindHost, FeedsConfig.linePort(basePort, v, line)));
                     ch.configureBlocking(false);

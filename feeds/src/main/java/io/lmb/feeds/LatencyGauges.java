@@ -7,7 +7,7 @@ import org.HdrHistogram.Recorder;
 
 /**
  * Latency recorded wait-free on the duty thread (HdrHistogram {@link Recorder}) and exposed as
- * quantile gauges (label {@code q} = p50, p99, p999, max) computed over the interval since the
+ * quantile gauges (label {@code quantile} = p50, p99, p999, max) computed over the interval since the
  * previous scrape. If nothing was recorded in an interval, the previous interval's values are kept.
  */
 public final class LatencyGauges
@@ -45,7 +45,7 @@ public final class LatencyGauges
         GaugeWithCallback.builder()
             .name(name)
             .help(help)
-            .labelNames("q")
+            .labelNames("quantile")
             .callback(cb ->
             {
                 final double[] s = snapshot();

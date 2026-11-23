@@ -110,7 +110,9 @@ final class LineArbitrator
         {
             final boolean restart = session != Long.MIN_VALUE;
             session = packetSession;
-            nextSeq = firstSeq;
+            // First contact: join mid-stream. Restart: the new session numbers from 1, so anything
+            // before this packet that is still missing is held for the other line like any hole.
+            nextSeq = restart ? 1 : firstSeq;
             lineNextSeq[0] = -1;
             lineNextSeq[1] = -1;
             clearPending();
@@ -135,7 +137,8 @@ final class LineArbitrator
     int checkTimeouts(final long nowNs)
     {
         int work = 0;
-        if (pendingCount > 0 && nowNs - oldestPendingReceiveNs() >= gapTimeoutNs)
+        // several holes can expire together (packets behind a second hole arrived as long ago)
+        while (pendingCount > 0 && nowNs - oldestPendingReceiveNs() >= gapTimeoutNs)
         {
             declareGap(nowNs);
             work++;

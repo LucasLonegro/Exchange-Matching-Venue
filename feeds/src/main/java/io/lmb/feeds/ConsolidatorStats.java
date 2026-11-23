@@ -117,13 +117,13 @@ public final class ConsolidatorStats
         perVenueGauge(registry, "lmb_feeds_venue_data_age_seconds",
             "Age of the venue's newest in-sequence data: now - min(venueTs, receiveTs)", venueDataAgeNs, false, 1e-9);
         perVenueCounter(registry, "lmb_feeds_venue_stale_transitions", "Times the venue became stale", staleTransitions);
-        perVenueCounter(registry, "lmb_feeds_venue_gaps", "Sequence gaps reported for the venue (all lines lost)", gaps);
+        perVenueCounter(registry, "lmb_feeds_gaps", "Sequence gaps reported for the venue (all lines lost)", gaps);
         perVenueCounter(registry, "lmb_feeds_venue_gap_messages", "Messages lost in venue gaps", gapMessages);
-        perVenueCounter(registry, "lmb_feeds_quotes", "Quotes received per venue", quotes);
+        perVenueCounter(registry, "lmb_feeds_messages", "Quotes delivered by the feed handler per venue", quotes);
 
-        counter(registry, "lmb_feeds_reference_updates_submitted", "ReferencePrice commands accepted by a shard", submitted);
+        counter(registry, "lmb_feeds_reference_prices_submitted", "ReferencePrice commands accepted by a shard", submitted);
         CounterWithCallback.builder()
-            .name("lmb_feeds_reference_updates_suppressed")
+            .name("lmb_feeds_reference_prices_suppressed")
             .help("Reference updates not sent: min_change (moved less than lmb.nbbo.minChangeTicks), " +
                 "superseded (replaced by a newer value while throttled or back-pressured), " +
                 "unavailable (NBBO lost: too few fresh venues or one-sided)")
