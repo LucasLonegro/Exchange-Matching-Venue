@@ -76,6 +76,7 @@ final class ReferenceMatcher
     final List<O> live = new ArrayList<>(); // orderId order
     final List<Pending> pending = new ArrayList<>();
     long orderSeq, matchSeq, timerSeq, timeSeq;
+    int tradingDate;
     List<String> out;
 
     ReferenceMatcher(final int shard)
@@ -1137,6 +1138,12 @@ final class ReferenceMatcher
 
     void dayRoll(final DayRolloverDecoder d)
     {
+        if (d.tradingDate() <= tradingDate)
+        {
+            out.add("CMDREJ corr=" + d.correlationId() + " t=14 r=INVALID_STATE_TRANSITION");
+            return;
+        }
+        tradingDate = d.tradingDate();
         final TreeMap<String, long[]> before = levels();
         int n = 0;
         for (final O o : new ArrayList<>(live))

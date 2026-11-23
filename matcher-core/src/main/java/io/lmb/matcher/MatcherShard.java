@@ -99,6 +99,8 @@ public final class MatcherShard implements ShardStateMachine
     long orderSeq;
     long matchSeq;
     long timerSeq;
+    /** Trading date of the last applied DayRollover (0 = none yet); makes the roll idempotent. */
+    int tradingDate;
     long internalErrors;
 
     // ---- per-step scratch ----
@@ -1206,6 +1208,15 @@ public final class MatcherShard implements ShardStateMachine
     private void onDayRollover(final DayRolloverDecoder d)
     {
         final long corr = d.correlationId();
+        // Idempotent: a roll that does not advance the trading date (a resend whose first copy was applied
+        // but whose DayRolled the sender had not seen yet) must not expire the new day's orders or clear
+        // the dedupe table.
+        if (d.tradingDate() <= tradingDate)
+        {
+            ew.commandRejected(corr, DayRolloverDecoder.TEMPLATE_ID, RejectReason.INVALID_STATE_TRANSITION);
+            return;
+        }
+        tradingDate = d.tradingDate();
         int expired = 0;
         Order o = allOrders.head;
         while (o != null)

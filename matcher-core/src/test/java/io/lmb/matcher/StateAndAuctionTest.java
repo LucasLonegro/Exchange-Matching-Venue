@@ -340,6 +340,24 @@ class StateAndAuctionTest
     }
 
     @Test
+    void dayRolloverIsIdempotentPerTradingDate()
+    {
+        final Harness h = new Harness().standard();
+        h.send(Cmd.dayRoll(77, 20261117));
+        h.send(Cmd.state(1, SYM, SymbolState.CONTINUOUS, 0));
+        assertKinds(h.send(Cmd.limit(SA, 1, A, SYM, Side.BUY, 9_900, 10)), "ER:NEW", "DELTA");
+        // a resend of the same roll, or a stale one, changes nothing: the order stays, dedupe is kept
+        assertEquals(List.of("CMDREJ corr=77 t=14 r=INVALID_STATE_TRANSITION"), t(h.send(Cmd.dayRoll(77, 20261117))));
+        assertEquals(List.of("CMDREJ corr=79 t=14 r=INVALID_STATE_TRANSITION"), t(h.send(Cmd.dayRoll(79, 20261116))));
+        assertReject(h.send(Cmd.limit(SA, 1, A, SYM, Side.BUY, 9_900, 10)), RejectReason.DUPLICATE_CLORDID);
+        assertEquals(20261117, h.m.tradingDate);
+        // the trading date survives a snapshot, and the next date rolls normally
+        final Harness r = h.restoreCopy();
+        assertEquals(20261117, r.m.tradingDate);
+        assertEquals(List.of("DAYROLLED corr=80 date=20261118 n=1"), t(h.send(Cmd.dayRoll(80, 20261118))).subList(3, 4));
+    }
+
+    @Test
     void scheduledTransitionsFireThroughTimers()
     {
         final Harness h = new Harness().standard();

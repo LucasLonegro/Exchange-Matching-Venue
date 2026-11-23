@@ -9,13 +9,13 @@ import java.nio.ByteOrder;
 import java.util.zip.CRC32;
 
 /**
- * Hand-written little-endian snapshot format, version 1. Everything is written in a canonical order that
+ * Hand-written little-endian snapshot format, version 2 (v1 is still read: v2 added tradingDate). Everything is written in a canonical order that
  * does not depend on hash table layout, pool indices or configured capacities, so two machines with the
  * same history produce byte-identical snapshots and a restored machine produces the same next snapshot.
  *
  * <pre>
  * magic "LMBM" int32, version int32, shardId int32
- * eventSeq, orderSeq, matchSeq, timerSeq int64; chain hash 32 bytes
+ * eventSeq, orderSeq, matchSeq, timerSeq int64; tradingDate int32 (v2+); chain hash 32 bytes
  * symbols   (definition order): symbolId, ticker[8], tick, lot, maxQty, bps, ref, lastRefSourceTs, state, auction indicative
  * firms     (creation order):   firmId, budget, maxPos, enabled, openNotional, tradedNet
  * firmSyms  (creation order):   firmIdx, symbolIdx, netPosition, openBuyQty, openSellQty
@@ -30,7 +30,7 @@ import java.util.zip.CRC32;
 final class SnapshotCodec
 {
     static final int MAGIC = 0x4D424D4C; // "LMBM"
-    static final int VERSION = 1;
+    static final int VERSION = 2;
     private static final byte TAG_LIVE = 0;
 
     private SnapshotCodec()
@@ -127,6 +127,7 @@ final class SnapshotCodec
         out.i64(m.orderSeq);
         out.i64(m.matchSeq);
         out.i64(m.timerSeq);
+        out.i32(m.tradingDate);
         out.bytes(m.ew.chain.current(), HashChain.HASH_LENGTH);
 
         out.i32(m.symbols.size());
@@ -269,9 +270,14 @@ final class SnapshotCodec
         {
             throw new IllegalStateException("snapshot checksum mismatch");
         }
-        if (in.i32() != MAGIC || in.i32() != VERSION)
+        if (in.i32() != MAGIC)
         {
-            throw new IllegalStateException("not a matcher-core v1 snapshot");
+            throw new IllegalStateException("not a matcher-core snapshot");
+        }
+        final int version = in.i32();
+        if (version < 1 || version > VERSION)
+        {
+            throw new IllegalStateException("unsupported matcher-core snapshot version " + version);
         }
         final int shard = in.i32();
         if (shard != m.shardId)
@@ -282,6 +288,7 @@ final class SnapshotCodec
         m.orderSeq = in.i64();
         m.matchSeq = in.i64();
         m.timerSeq = in.i64();
+        m.tradingDate = version >= 2 ? in.i32() : 0;
         final byte[] hash = new byte[HashChain.HASH_LENGTH];
         in.bytes(hash, HashChain.HASH_LENGTH);
         m.ew.chain.set(hash, 0);

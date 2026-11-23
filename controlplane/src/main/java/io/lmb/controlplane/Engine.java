@@ -548,7 +548,9 @@ public final class Engine
                 if (c != null && c.shardId == sh.shardId)
                 {
                     final RejectReason reason = rejected.rejectReason();
-                    if (c.kind == Kind.SYMBOL_STATE && reason == RejectReason.INVALID_STATE_TRANSITION && levelSatisfied(c))
+                    // DAY_ROLLOVER: the matcher rejects a roll that does not advance the trading date (idempotent).
+                    if ((c.kind == Kind.SYMBOL_STATE || c.kind == Kind.DAY_ROLLOVER)
+                        && reason == RejectReason.INVALID_STATE_TRANSITION && levelSatisfied(c))
                     {
                         tracker.resolve(c, Status.CONFIRMED, "already in target state");
                     }

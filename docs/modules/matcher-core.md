@@ -119,6 +119,9 @@ delta. Multi-order operations (mass cancel, expiry, uncross) emit their reports 
 - **MassCancel**: cancels in orderId order. FIRM, SESSION (firm + sessionId), FIRM_SYMBOL and SYMBOL use
   intrusive per-firm/session/firm-symbol/symbol lists (O(k)); GATEWAY scans all live orders.
 - **DayRollover** also resets positions and traded notional and leaves REMOVED symbols alone.
+- **DayRollover is idempotent per trading date**: a roll whose `tradingDate` is not greater than the last
+  applied one (a resend, or a stale roll) is `CommandRejected(INVALID_STATE_TRANSITION)` and changes nothing.
+  The last trading date is in the snapshot (format version 2; version 1 snapshots still load, as date 0).
 - **Internal error** (an unexpected exception, i.e. a bug): logged, counted (`internalErrors()`), and the
   entry still ends with `CommandApplied`; all replicas behave identically.
 
