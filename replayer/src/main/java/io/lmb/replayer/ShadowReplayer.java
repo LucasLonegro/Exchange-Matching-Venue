@@ -51,6 +51,8 @@ public final class ShadowReplayer implements AutoCloseable
     private long lastReopenNs;
     private int lastFill;
     private long quietSinceNs;
+    /** Confirmed position when the stream was first seen caught up (a short poll with events); ready once verified. */
+    private long readyTarget = -1;
 
     // published for other threads
     private volatile long startPosition = -1;
@@ -213,7 +215,7 @@ public final class ShadowReplayer implements AutoCloseable
                 metrics.logReopens.inc();
                 if (!logDir.equals(oldDir))
                 {
-                    LOG.info("replayer shard {} now reads the log of {}", config.shardId, logDir);
+                    LOG.debug("replayer shard {} now reads the log of {}", config.shardId, logDir);
                 }
             }
             final long to = Math.min(confirmed, log.recordedPosition());
@@ -233,7 +235,17 @@ public final class ShadowReplayer implements AutoCloseable
             // caught up = connected, everything received is verified, and the stream stayed quiet for a while
             // (a freshly connected stream may deliver nothing for a moment, so one empty poll is not enough)
             final long now = System.nanoTime();
-            if (lastFill > 0 || !stream.isConnected() || quietSinceNs == 0)
+            // a busy venue (feeds send reference prices all the time) is never quiet: once a short poll shows the
+            // stream backlog is drained, become ready when everything confirmed at that moment is verified
+            if (stream.isConnected() && lastFill > 0 && lastFill < FILL_LIMIT && readyTarget < 0)
+            {
+                readyTarget = confirmed;
+            }
+            if (readyTarget >= 0 && verifier.verifiedPosition() >= readyTarget)
+            {
+                readyLatch.countDown();
+            }
+            else if (lastFill > 0 || !stream.isConnected() || quietSinceNs == 0)
             {
                 quietSinceNs = now;
             }
