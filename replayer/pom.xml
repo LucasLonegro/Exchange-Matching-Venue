@@ -13,6 +13,11 @@
 
   <dependencies>
     <dependency><groupId>io.lmb</groupId><artifactId>lmb-common</artifactId></dependency>
+    <dependency><groupId>io.lmb</groupId><artifactId>lmb-schemas</artifactId></dependency>
+    <!-- RaftLogReader / RaftLogDecoder (and, transitively, the cluster-client VenueClients provider) -->
+    <dependency><groupId>io.lmb</groupId><artifactId>lmb-cluster-node</artifactId></dependency>
+    <!-- the state machine, found through ShardStateMachineFactory.load() -->
+    <dependency><groupId>io.lmb</groupId><artifactId>lmb-matcher-core</artifactId><scope>runtime</scope></dependency>
     <dependency><groupId>io.aeron</groupId><artifactId>aeron-client</artifactId></dependency>
     <dependency><groupId>io.aeron</groupId><artifactId>aeron-driver</artifactId></dependency>
     <dependency><groupId>io.aeron</groupId><artifactId>aeron-archive</artifactId></dependency>
