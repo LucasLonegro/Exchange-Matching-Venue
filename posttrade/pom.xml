@@ -9,18 +9,22 @@
     <version>0.1.0-SNAPSHOT</version>
   </parent>
   <artifactId>lmb-posttrade</artifactId>
-  <name>LMB post-trade: drop copy, Kafka bridge, WORM archive, ClickHouse</name>
+  <name>LMB post-trade: trade store, FIX drop copy, surveillance sink</name>
 
   <dependencies>
     <dependency><groupId>io.lmb</groupId><artifactId>lmb-common</artifactId></dependency>
     <dependency><groupId>io.lmb</groupId><artifactId>lmb-fix-codecs</artifactId></dependency>
+    <dependency><groupId>org.agrona</groupId><artifactId>agrona</artifactId></dependency>
     <dependency><groupId>uk.co.real-logic</groupId><artifactId>artio-core</artifactId></dependency>
     <dependency><groupId>org.apache.kafka</groupId><artifactId>kafka-clients</artifactId></dependency>
-    <dependency><groupId>software.amazon.awssdk</groupId><artifactId>s3</artifactId></dependency>
-    <dependency><groupId>com.clickhouse</groupId><artifactId>clickhouse-jdbc</artifactId></dependency>
+    <dependency><groupId>org.postgresql</groupId><artifactId>postgresql</artifactId><scope>runtime</scope></dependency>
+    <!-- H2: tests and the local lite profile (file database) -->
+    <dependency><groupId>com.h2database</groupId><artifactId>h2</artifactId><scope>runtime</scope></dependency>
     <dependency><groupId>org.hdrhistogram</groupId><artifactId>HdrHistogram</artifactId></dependency>
     <dependency><groupId>io.prometheus</groupId><artifactId>prometheus-metrics-core</artifactId></dependency>
     <dependency><groupId>io.prometheus</groupId><artifactId>prometheus-metrics-exporter-httpserver</artifactId></dependency>
     <dependency><groupId>io.lmb</groupId><artifactId>lmb-testkit</artifactId><scope>test</scope></dependency>
+    <dependency><groupId>io.lmb</groupId><artifactId>lmb-matcher-core</artifactId><scope>test</scope></dependency>
+    
   </dependencies>
 </project>

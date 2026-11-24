@@ -1,0 +1,8 @@
+<configuration>
+  <appender name="OUT" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder><pattern>%d{HH:mm:ss.SSS} %-5level [%thread] %logger{20} - %msg%n</pattern></encoder>
+  </appender>
+  <logger name="uk.co.real_logic" level="WARN"/>
+  <logger name="org.apache.kafka" level="WARN"/>
+  <root level="WARN"><appender-ref ref="OUT"/></root>
+</configuration>
