@@ -140,7 +140,9 @@ wait_ready() {
     for name in "${pending[@]}"; do
       if is_ready "$name"; then
         ok "$name ready after $((SECONDS - start))s (pid $(pid_of "$name"))"
-      elif ! is_alive "$name"; then
+      # Right after launch the pid is still the bash launcher (no -Dlmb.local.tag on its cmdline until
+      # lmb-run execs java), so is_alive alone reports a slow start as an exit.
+      elif ! is_alive "$name" && [[ "$(ps -o stat= -p "$(pid_of "$name")" 2>/dev/null || true)" =~ ^(Z.*)?$ ]]; then
         fail_start "$name" "exited before printing LMB_READY (see the log above; $(log_file "$name"))"
         return 1
       else
@@ -293,11 +295,15 @@ write_cmd() {
     echo 'set -f  # LMB_COMMON_ARGS / LMB_EXTRA_ARGS are word-split, never globbed'
     echo 'cd "$LMB_ROOT"'
     printf 'args=(%s' "$(q "$main")"
+    # Only nodes run a media driver in lmb.aeron.dir. For any other service lmb.aeron.dir would make
+    # cluster-client connect to an external driver that does not exist:
+    # they get an embedded client driver under the same per-process directory instead.
     printf ' %s' \
       "$(q "-Dlmb.topology=$LMB_TOPO_FILE")" \
       "$(q "-Dlmb.data.dir=$LMB_DATA")" \
       "$(q "-Daeron.dir=$LMB_SHM_DIR/$name")" \
-      "$(q "-Dlmb.aeron.dir=$LMB_SHM_DIR/$name")" \
+      "$(q "$( [ "$svc" = node ] && echo "-Dlmb.aeron.dir=$LMB_SHM_DIR/$name" \
+               || echo "-Dlmb.client.aeron.dir.base=$LMB_SHM_DIR/$name")")" \
       "$(q "-Dlmb.local.process=$name")" \
       "$(q "-Dlmb.local.tag=$LMB_TAG")"
     for f in "$@"; do printf ' %s' "$(q "$f")"; done
