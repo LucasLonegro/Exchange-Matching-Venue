@@ -60,7 +60,7 @@ groups:
       - record: "lmb:replayer_lag_events"
         expr: "max by (shard) (lmb_replayer_lag_events)"
       - record: "lmb:posttrade_sink_lag_events"
-        expr: "max by (sink, shard) (lmb_posttrade_sink_lag_events)"
+        expr: "max by (shard) (lmb_cluster_last_event_seq) - on (shard) group_right max by (sink, shard) (lmb_posttrade_last_event_seq)"
       - record: "lmb:ledger_lag_events"
         expr: "max by (shard) (lmb_cluster_last_event_seq) - on (shard) max by (shard) (lmb_ledger_last_event_seq)"
       - record: "lmb:ledger_restarts:increase15m"

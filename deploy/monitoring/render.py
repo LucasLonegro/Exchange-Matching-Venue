@@ -218,8 +218,9 @@ def recording_rules(n):
         rec("lmb:replay_divergence:increase5m", f"sum by ({sl}) (increase({n['REPLAYER_DIVERGENCE_TOTAL']}[5m]))")
     if n.get("REPLAYER_LAG_EVENTS"):
         rec("lmb:replayer_lag_events", f"max by ({sl}) ({n['REPLAYER_LAG_EVENTS']})")
-    if n.get("POSTTRADE_SINK_LAG_EVENTS"):
-        rec("lmb:posttrade_sink_lag_events", f"max by (sink, {sl}) ({n['POSTTRADE_SINK_LAG_EVENTS']})")
+    if n.get("POSTTRADE_LAST_EVENT_SEQ") and n.get("CLUSTER_LAST_EVENT_SEQ"):
+        rec("lmb:posttrade_sink_lag_events", f"max by ({sl}) ({n['CLUSTER_LAST_EVENT_SEQ']}) - on ({sl}) group_right "
+            f"max by (sink, {sl}) ({n['POSTTRADE_LAST_EVENT_SEQ']})")
     if n.get("LEDGER_LAST_EVENT_SEQ") and n.get("CLUSTER_LAST_EVENT_SEQ"):
         rec("lmb:ledger_lag_events", f"max by ({sl}) ({n['CLUSTER_LAST_EVENT_SEQ']}) - on ({sl}) "
             f"max by ({sl}) ({n['LEDGER_LAST_EVENT_SEQ']})")
