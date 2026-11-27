@@ -2,7 +2,7 @@ package io.lmb.posttrade.surveillance;
 
 import io.lmb.common.Events;
 import io.lmb.posttrade.PostTradeMetrics;
-import io.lmb.posttrade.SinkRunner;
+import io.lmb.api.SinkRunner;
 import io.lmb.posttrade.TestVenue;
 import io.lmb.sbe.ExecutionReportDecoder;
 import io.lmb.sbe.Side;

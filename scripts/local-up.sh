@@ -3,14 +3,15 @@
 #
 #   scripts/local-up.sh                  2 shards x 2 members, 2 gateways, 2 MD publishers (A/B),
 #                                        2 control planes (no NBBO consolidators or feed simulator:
-#                                        the venue sets its own reference prices), post-trade, 1 shadow replayer per shard
-#   scripts/local-up.sh --minimal        1 shard x 1 member and one of everything, no post-trade
+#                                        the venue sets its own reference prices), post-trade, the ledger,
+#                                        1 shadow replayer per shard
+#   scripts/local-up.sh --minimal        1 shard x 1 member and one of everything, no post-trade or ledger
 #   scripts/local-up.sh --members 3      3 members per shard (survives a leader kill: kill-leader.sh)
 #   scripts/local-up.sh --dry-run        print the exact commands, start nothing
 #   scripts/local-up.sh --restart gateway-1    relaunch one process with its saved command
 #
 # Start order: shard nodes -> wait for a leader per shard -> control plane -> consolidators and feed
-# simulator -> market data -> gateways -> post-trade -> replayers. Each process must print
+# simulator -> market data -> gateways -> post-trade -> ledger -> replayers. Each process must print
 # "LMB_READY <service> <instance>" within the tier timeout; otherwise the run is torn down (unless
 # --keep-on-failure) and the tail of the failing log is printed.
 #
@@ -25,7 +26,7 @@
 #   --heap <target>=256m              max heap
 # The env files are sourced by bash with `set -a`. Besides any LMB_<KEY> config they may set
 # LMB_HEAP, LMB_JAVA_OPTS (JVM flags; append to it), LMB_COMMON_ARGS / LMB_EXTRA_ARGS (-D arguments).
-# Service names: node gateway marketdata consolidator feedsim controlplane posttrade replayer.
+# Service names: node gateway marketdata consolidator feedsim controlplane posttrade ledger replayer.
 set -euo pipefail
 # shellcheck source=lib/local-common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib/local-common.sh"
@@ -33,8 +34,8 @@ set -euo pipefail
 usage() { sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed -e '$d' -e 's/^# \{0,1\}//'; cat <<'EOF'
 Options:
   --shards N --members N --gateways N --md N --consolidators N --controlplanes N
-  --minimal               1 shard x 1 member, one instance of each service, no post-trade
-  --no-posttrade --no-replayer --no-marketdata --no-gateways
+  --minimal               1 shard x 1 member, one instance of each service, no post-trade or ledger
+  --no-posttrade --no-ledger --no-replayer --no-marketdata --no-gateways
   --consolidators N --with-feedsim   also run NBBO consolidators and the feed simulator (legacy, external-market mode)
   --skip <name|service>   do not start it (repeatable)
   --full                  use deploy/local/full.env (start the infrastructure first:
@@ -58,7 +59,7 @@ EOF
 # ---- arguments ---------------------------------------------------------------------------------------
 BASE_TOPO="$LMB_ROOT/deploy/local/topology.properties"
 SHARDS=""; MEMBERS=""; GATEWAYS=""; MDS=""; CONS=""; CPS=""
-WITH_POSTTRADE=1; WITH_REPLAYER=1; WITH_FEEDSIM=0
+WITH_POSTTRADE=1; WITH_LEDGER=1; WITH_REPLAYER=1; WITH_FEEDSIM=0
 FULL=0; DRY_RUN=0; FORCE=0; KEEP_ON_FAILURE=0; STRICT_LEADERS=0
 TIER_TIMEOUT=120; LEADER_TIMEOUT=60
 RESTART=""
@@ -75,8 +76,9 @@ while [ $# -gt 0 ]; do
     --md)             need "$@"; posint "$1" "$2"; MDS="$2"; shift ;;
     --consolidators)  need "$@"; posint "$1" "$2"; CONS="$2"; shift ;;
     --controlplanes)  need "$@"; posint "$1" "$2"; CPS="$2"; shift ;;
-    --minimal)        SHARDS=1; MEMBERS=1; GATEWAYS=1; MDS=1; CONS=0; CPS=1; WITH_POSTTRADE=0 ;;
+    --minimal)        SHARDS=1; MEMBERS=1; GATEWAYS=1; MDS=1; CONS=0; CPS=1; WITH_POSTTRADE=0; WITH_LEDGER=0 ;;
     --no-posttrade)   WITH_POSTTRADE=0 ;;
+    --no-ledger)      WITH_LEDGER=0 ;;
     --no-replayer|--no-replayers) WITH_REPLAYER=0 ;;
     --no-feedsim)     WITH_FEEDSIM=0 ;;
     --with-feedsim)   WITH_FEEDSIM=1 ;;
@@ -205,6 +207,7 @@ for ((i = 0; i < CONS; i++)); do plan feeds "consolidator-$i" consolidator "-Dlm
 for ((i = 0; i < MDS; i++)); do plan marketdata "marketdata-$i" marketdata "-Dlmb.instance.id=$i"; done
 for ((i = 0; i < GATEWAYS; i++)); do plan gateways "gateway-$i" gateway "-Dlmb.instance.id=$i"; done
 [ "$WITH_POSTTRADE" -eq 1 ] && plan posttrade posttrade-0 posttrade "-Dlmb.instance.id=0"
+[ "$WITH_LEDGER" -eq 1 ] && plan ledger ledger-0 ledger "-Dlmb.instance.id=0"
 if [ "$WITH_REPLAYER" -eq 1 ]; then
   RBASE="$(topo_get lmb.replayer.metricsPort 9900)"
   for ((s = 0; s < SHARDS; s++)); do
@@ -545,6 +548,7 @@ for name in $(started_names); do
     controlplane-*) i="${name#controlplane-}"
                     log "    $name  admin REST http://$(host_of "$name"):$(topo_get "lmb.controlplane.$i.restPort" $((9700 + i)))/" ;;
     posttrade-*)    log "    $name  FIX drop copy 127.0.0.1:$(topo_get lmb.posttrade.dropCopyFixPort 9800)" ;;
+    ledger-*)       log "    $name  daily statements in $LMB_DATA/ledger/${name#ledger-}/statements" ;;
   esac
 done
 log "    metrics: http://127.0.0.1:<port>/metrics (scripts/local-status.sh --probe lists them)"

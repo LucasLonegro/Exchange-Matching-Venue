@@ -1,5 +1,7 @@
 package io.lmb.posttrade;
 
+import io.lmb.api.PostTradeSink;
+import io.lmb.api.SinkRunner;
 import io.lmb.api.VenueClients;
 import io.lmb.common.FirmDirectory;
 import io.lmb.common.SymbolDirectory;

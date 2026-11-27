@@ -43,7 +43,7 @@ Stack: Java 21, Aeron Cluster + Archive 1.54, Agrona, SBE, Artio (FIX), grpc-jav
 |---|---|---|
 | `schemas` | `io.lmb.sbe` | SBE schema `venue.xml`: commands (templateId 1-99) and events (100-199). Frozen. |
 | `api-proto` | `io.lmb.proto.*` | gRPC API: `order_entry.proto`, `market_data.proto`. Frozen. |
-| `common` | `io.lmb.api`, `io.lmb.common` | `ShardStateMachine`, `EventSink`, `TimerScheduler`, `CommandClient`, `EventStreamClient`, `VenueClients`, `Topology`, `Config`, `SymbolDirectory`, `FirmDirectory`, `HashChain`, `Events`. Frozen. |
+| `common` | `io.lmb.api`, `io.lmb.common` | `ShardStateMachine`, `EventSink`, `TimerScheduler`, `CommandClient`, `EventStreamClient`, `VenueClients`, `PostTradeSink` and `SinkRunner` (durable event stream consumers), `Topology`, `Config`, `SymbolDirectory`, `FirmDirectory`, `HashChain`, `Events`. Frozen. |
 | `testkit` | `io.lmb.testkit` | `InMemoryVenue`: a `VenueClients` that drives state machines in memory, no Aeron. Frozen. |
 | `matcher-core` | `io.lmb.matcher` | The state machine: books, matching, risk, dedupe, symbol states, auctions, snapshot. No Aeron dependency. |
 | `cluster-client` | `io.lmb.cluster.client` | Aeron implementation of `VenueClients` (command ingress, event stream subscription). |
@@ -54,6 +54,7 @@ Stack: Java 21, Aeron Cluster + Archive 1.54, Agrona, SBE, Artio (FIX), grpc-jav
 | `feeds` | `io.lmb.feeds` | Feed handler SPI, simulated external venues, NBBO consolidator. |
 | `controlplane` | `io.lmb.controlplane` | Reference data and limits (PostgreSQL), admin REST, scheduler, risk-budget allocator. |
 | `posttrade` | `io.lmb.posttrade` | FIX drop copy, Kafka bridge, WORM archiver (S3 Object Lock), ClickHouse loader. |
+| `ledger` | `io.lmb.ledger` | Cash, positions, average cost, realised and unrealised PnL per firm; nightly marks at the official close; daily statements (PostgreSQL and files). |
 | `replayer` | `io.lmb.replayer` | Shadow replayer (re-executes the log, compares hashes) and backtester. |
 | `tools` | `io.lmb.tools` | Load generator, latency probe, CLI clients, end-to-end tests. |
 | `dist` | - | Collects every jar into `dist/target/lmb/lib`. `scripts/lmb-run <main>` runs a service from it. |
@@ -270,6 +271,7 @@ All services are plain `main` classes on the shared classpath. Common convention
 | NBBO consolidator (optional, legacy) | `io.lmb.feeds.ConsolidatorMain` | 0 (`--consolidators N`) / 0 |
 | Control plane | `io.lmb.controlplane.ControlPlaneMain` | 2 / 2 |
 | Post-trade | `io.lmb.posttrade.PostTradeMain` | 1 / 2 |
+| Ledger | `io.lmb.ledger.LedgerMain` | 1 / 1 (exactly one: the only writer of its tables) |
 | Shadow replayer | `io.lmb.replayer.ShadowReplayerMain` | 1 per shard / 1 per shard |
 | Backtester | `io.lmb.replayer.BacktestMain` | on demand |
 | Load generator | `io.lmb.tools.LoadGeneratorMain` | on demand |
@@ -339,6 +341,11 @@ All services are plain `main` classes on the shared classpath. Common convention
   (Artio), Kafka topics for clearing/surveillance, raw log and event segments to S3 with Object Lock,
   decoded events to ClickHouse. Each sink can be disabled (`lmb.posttrade.<sink>.enabled`); the local
   lite profile writes to files instead of external systems.
+- Ledger: one more event stream consumer with a persisted cursor (in the same transaction as its state).
+  Per firm and symbol it keeps position, average cost, realised PnL and cash. At each shard's DayRolled it
+  marks positions to the official close (the day's last ClosingPrice). Once every shard has ended a
+  trading day it writes each firm's daily statement. The exchange publishes prices; valuation lives here.
+  Details: docs/modules/ledger.md.
 - Shadow replayer: reads the shard's Raft log from a member's Archive, runs the same
   `ShardStateMachine`, and compares each `CommandApplied.chainHash` with the live event stream.
   Divergence is a page-worthy metric. Backtester: same machine over a recorded log plus injected orders.
@@ -361,6 +368,6 @@ All services are plain `main` classes on the shared classpath. Common convention
 - Tests must not need network access or Docker, must use unique temp and Aeron directories under
   the module's `target/`, small term buffers, and only ports from the module's test range:
   cluster-client 32000-32999, cluster-node 31000-31999, gateway 33000-33999, marketdata 34000-34999,
-  feeds 35000-35999, controlplane 36000-36999, posttrade 37000-37999, replayer 38000-38999, tools 39000-39999.
+  feeds 35000-35999, controlplane 36000-36999, posttrade 37000-37999, replayer 38000-38999, tools 39000-39999 (ledger tests open no ports).
 - Each module documents itself in `docs/modules/<module>.md`: what it does, configuration keys,
   how to run it, known gaps.

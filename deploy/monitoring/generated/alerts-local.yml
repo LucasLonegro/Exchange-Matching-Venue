@@ -155,6 +155,42 @@ groups:
         annotations:
           summary: "Post-trade sink {{ $labels.sink }} behind on shard {{ $labels.shard }}"
           runbook: "docs/operations.md"
+      - alert: "LmbLedgerLag"
+        expr: "lmb:ledger_lag_events > 1000000"
+        for: "5m"
+        labels:
+          severity: "warning"
+          profile: "local"
+        annotations:
+          summary: "Ledger {{ $value }} events behind on shard {{ $labels.shard }} (positions and statements stale)"
+          runbook: "docs/operations.md"
+      - alert: "LmbLedgerRestarting"
+        expr: "lmb:ledger_restarts:increase15m > 3"
+        for: "0m"
+        labels:
+          severity: "warning"
+          profile: "local"
+        annotations:
+          summary: "Ledger restarted {{ $value }} times in 15m: database down, or stuck on an event it cannot apply (see its log)"
+          runbook: "docs/operations.md"
+      - alert: "LmbLedgerNotOpen"
+        expr: "lmb:ledger_up == 0"
+        for: "2m"
+        labels:
+          severity: "warning"
+          profile: "local"
+        annotations:
+          summary: "Ledger process is up but its sink is not open (restart backoff loop)"
+          runbook: "docs/operations.md"
+      - alert: "LmbLedgerStatementsLate"
+        expr: "lmb:ledger_pending_statement_dates > 0"
+        for: "30m"
+        labels:
+          severity: "warning"
+          profile: "local"
+        annotations:
+          summary: "{{ $value }} trading date(s) ended on some shards but not all: daily statements not written"
+          runbook: "docs/operations.md"
       - alert: "LmbControlPlaneLockHolders"
         expr: "lmb:controlplane_lock_holders != 1"
         for: "1m"

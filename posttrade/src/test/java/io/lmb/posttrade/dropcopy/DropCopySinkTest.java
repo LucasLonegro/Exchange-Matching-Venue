@@ -3,7 +3,7 @@ package io.lmb.posttrade.dropcopy;
 import io.lmb.common.Events;
 import io.lmb.common.FirmDirectory;
 import io.lmb.posttrade.PostTradeMetrics;
-import io.lmb.posttrade.SinkRunner;
+import io.lmb.api.SinkRunner;
 import io.lmb.posttrade.TestVenue;
 import io.lmb.sbe.ExecType;
 import io.lmb.sbe.ExecutionReportDecoder;

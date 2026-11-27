@@ -1,7 +1,7 @@
 # posttrade
 
 Post-trade consumers of the shards' event streams (ARCHITECTURE.md 5.5). One process, `io.lmb.posttrade.PostTradeMain`,
-runs up to three independent sinks, each on its own `SinkRunner` thread with its own event stream per shard and its own
+runs up to three independent sinks, each on its own `SinkRunner` thread (`io.lmb.api`, in common, shared with the ledger) with its own event stream per shard and its own
 durable cursor. A slow or failing sink never stalls the others; a failing sink is closed and reopened from its cursor
 after `restartBackoffMs` (the process keeps running).
 
@@ -16,8 +16,8 @@ after `restartBackoffMs` (the process keeps running).
 |---|---|
 | `PostTradeMain` | process entry: topology, firm/symbol directories, `VenueClients.connect`, READY line, SIGTERM |
 | `PostTrade` | one instance, usable in-process: builds the enabled sinks, runners, drop copy engine, metrics endpoint |
-| `SinkRunner` | thread per sink: polls a stream per shard, drops redeliveries (eventSeq <= cursor), fails the sink on a gap, restarts it |
-| `PostTradeSink` | sink SPI: `open` returns the durable cursor per shard, `onEvent`, `doWork`, `close(clean)` |
+| `io.lmb.api.SinkRunner` (common) | thread per sink: polls a stream per shard, drops redeliveries (eventSeq <= cursor), fails the sink on a gap, restarts it |
+| `io.lmb.api.PostTradeSink` (common) | sink SPI: `open` returns the durable cursor per shard, `onEvent`, `doWork`, `close(clean)` |
 | `CursorFile` | key=value + CRC32 checkpoint file, tmp + fsync + atomic rename |
 | `PostTradeMetrics` | `lmb_posttrade_*` Prometheus metrics |
 

@@ -1,7 +1,5 @@
-package io.lmb.posttrade;
+package io.lmb.api;
 
-import io.lmb.api.EventStreamClient;
-import io.lmb.api.VenueClients;
 import io.lmb.common.Events;
 import org.agrona.DirectBuffer;
 import org.agrona.concurrent.BackoffIdleStrategy;
@@ -56,7 +54,7 @@ public final class SinkRunner implements AutoCloseable
         this.restartBackoffMs = restartBackoffMs;
         this.lastSeq = new AtomicLongArray(shards);
         this.caughtUpShard = new boolean[shards];
-        this.thread = new Thread(this::run, "posttrade-" + sink.name());
+        this.thread = new Thread(this::run, "sink-" + sink.name());
     }
 
     public SinkRunner start()

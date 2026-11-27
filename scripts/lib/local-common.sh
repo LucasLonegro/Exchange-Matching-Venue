@@ -10,7 +10,7 @@
 #   data/local/<service>-<id>/...   service state (lmb.data.dir=data/local; owned by the services)
 #   /dev/shm/lmb-local-<user>-<tag>/<name>   Aeron directory per process (removed by local-down.sh)
 # Process names: node-<shard>-<member>, gateway-<i>, marketdata-<i>, consolidator-<i>, feedsim-0,
-# controlplane-<i>, posttrade-0, replayer-<shard>.
+# controlplane-<i>, posttrade-0, ledger-0, replayer-<shard>.
 
 LMB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LMB_DATA="${LMB_LOCAL_DATA:-$LMB_ROOT/data/local}"
@@ -43,13 +43,14 @@ declare -gA LMB_MAIN=(
   [consolidator]=io.lmb.feeds.ConsolidatorMain
   [controlplane]=io.lmb.controlplane.ControlPlaneMain
   [posttrade]=io.lmb.posttrade.PostTradeMain
+  [ledger]=io.lmb.ledger.LedgerMain
   [replayer]=io.lmb.replayer.ShadowReplayerMain
 )
-# Default max heap per service for the local profile. Whole default profile (16 JVMs) is about
+# Default max heap per service for the local profile. Whole default profile (14 JVMs) is about
 # 1.7 GB of heap plus ~80 MB non-heap each (capped in deploy/local/common.env): under ~3 GB RSS.
 declare -gA LMB_DEFAULT_HEAP=(
   [node]=160m [backup]=128m [gateway]=96m [marketdata]=96m [feedsim]=64m [consolidator]=64m
-  [controlplane]=128m [posttrade]=96m [replayer]=96m
+  [controlplane]=128m [posttrade]=96m [ledger]=96m [replayer]=96m
 )
 LMB_NONHEAP_ESTIMATE_MB=80
 
@@ -144,6 +145,7 @@ metrics_port_of() {
     feedsim)      topo_get lmb.feedsim.metricsPort 9650 ;;
     controlplane) i="$rest"; topo_get "lmb.controlplane.$i.metricsPort" $((9710 + i)) ;;
     posttrade)    topo_get lmb.posttrade.metricsPort 9810 ;;
+    ledger)       i="$rest"; echo $(( $(topo_get lmb.ledger.metricsPort 9820) + i )) | tr -d '\n' ;;
     # Topology has a single lmb.replayer.metricsPort; locally there is one replayer per shard, so
     # local-up.sh passes -Dlmb.replayer.metricsPort=<base + shard> (contract change request filed).
     replayer)     echo $(( $(topo_get lmb.replayer.metricsPort 9900) + rest )) | tr -d '\n' ;;

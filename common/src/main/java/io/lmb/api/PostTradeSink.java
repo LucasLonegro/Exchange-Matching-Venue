@@ -1,4 +1,4 @@
-package io.lmb.posttrade;
+package io.lmb.api;
 
 import org.agrona.DirectBuffer;
 
