@@ -121,6 +121,23 @@ class SurveillanceSinkTest
     }
 
     @Test
+    void selfTradeCancelIsRecordedWithItsReason() throws IOException
+    {
+        venue.order(0, 100, Side.SELL, 10_000, 5);
+        final long taker = venue.order(0, 100, Side.BUY, 10_000, 5); // crosses its own firm's resting sell
+        start();
+        awaitApplied();
+        stop();
+        final List<String> lines = assertFile();
+        assertTrue(lines.stream().noneMatch(l -> l.contains("\"type\":\"Trade\"")), "no self trade printed");
+        final List<String> cancels = lines.stream().filter(l -> l.contains("\"execType\":\"CANCELED\"")).toList();
+        assertEquals(1, cancels.size(), cancels.toString());
+        final String cancel = cancels.get(0);
+        assertTrue(cancel.contains("\"cancelReason\":\"SELF_TRADE\"") && cancel.contains("\"clOrdId\":" + taker + ",") &&
+            cancel.contains("\"firmId\":100") && cancel.contains("\"side\":\"BUY\""), cancel);
+    }
+
+    @Test
     void restartRecoversFromTheFileItselfAfterLostAndTornWrites() throws IOException
     {
         trade();

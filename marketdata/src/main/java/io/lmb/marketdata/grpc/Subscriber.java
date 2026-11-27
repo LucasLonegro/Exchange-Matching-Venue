@@ -169,7 +169,18 @@ final class Subscriber
         v.sent.copyTop(s.book, depth);
         v.dirty = false;
         v.lastFlushNs = nowNs;
-        final BookSnapshot.Builder snap = BookSnapshot.newBuilder().setState(s.stateName());
+        final BookSnapshot.Builder snap = BookSnapshot.newBuilder().setState(s.stateName())
+            .setStateCause(s.stateCauseName());
+        final io.lmb.proto.marketdata.ReferencePrice reference = s.reference();
+        if (reference != null)
+        {
+            snap.setReference(reference); // day-cycle / band-stp
+        }
+        final io.lmb.proto.marketdata.ClosingPrice close = s.close();
+        if (close != null)
+        {
+            snap.setLastClose(close);
+        }
         for (int i = 0; i < v.sent.levels(OrderBook.BID); i++)
         {
             snap.addBids(level(v.sent, OrderBook.BID, i));

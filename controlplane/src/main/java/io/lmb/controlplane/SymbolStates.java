@@ -78,10 +78,39 @@ public final class SymbolStates
     }
 
     /**
-     * The single transition to command now for a symbol, given what the shard reports, what the calendar
-     * (or autoOpen) wants (null = no opinion right now) and the operator override (null, HALTED or AUCTION_CALL).
+     * {@link #nextHop(SymbolState, SymbolState)} for a symbol that may be in a matcher-initiated volatility auction
+     * (AUCTION_CALL entered with cause VOLATILITY_INTERRUPTION). During one, a hop to CONTINUOUS gives null (the
+     * matcher's timer ends the auction; commanding CONTINUOUS would cut it short), and a target of AUCTION_CALL gives
+     * AUCTION_CALL (the matcher lets a scheduled or operator auction take the volatility auction over, which cancels
+     * its timer). HALTED, CLOSED and PRE_OPEN (via CLOSED) go as usual: any such transition ends the volatility auction.
      */
+    public static SymbolState nextHop(final SymbolState from, final boolean volatilityAuction, final SymbolState to)
+    {
+        if (volatilityAuction && from == SymbolState.AUCTION_CALL)
+        {
+            if (to == SymbolState.AUCTION_CALL)
+            {
+                return SymbolState.AUCTION_CALL;
+            }
+            final SymbolState hop = nextHop(from, to);
+            return hop == SymbolState.CONTINUOUS ? null : hop;
+        }
+        return nextHop(from, to);
+    }
+
+    /** {@link #desiredHop(SymbolState, boolean, SymbolState, String)} for a symbol not in a volatility auction. */
     public static SymbolState desiredHop(final SymbolState observed, final SymbolState calendarTarget, final String operatorState)
+    {
+        return desiredHop(observed, false, calendarTarget, operatorState);
+    }
+
+    /**
+     * The single transition to command now for a symbol, given what the shard reports (state, and whether it is in a
+     * volatility auction), what the calendar (or autoOpen) wants (null = no opinion right now) and the operator
+     * override (null, HALTED or AUCTION_CALL). Volatility auctions as in {@link #nextHop(SymbolState, boolean, SymbolState)}.
+     */
+    public static SymbolState desiredHop(final SymbolState observed, final boolean volatilityAuction,
+        final SymbolState calendarTarget, final String operatorState)
     {
         if (observed == null || observed == SymbolState.REMOVED)
         {
@@ -101,12 +130,12 @@ public final class SymbolStates
         }
         if ("AUCTION_CALL".equals(operatorState) && calendarTarget != SymbolState.CLOSED)
         {
-            return nextHop(observed, SymbolState.AUCTION_CALL);
+            return nextHop(observed, volatilityAuction, SymbolState.AUCTION_CALL);
         }
         if (calendarTarget == null)
         {
             return null;
         }
-        return nextHop(observed, calendarTarget);
+        return nextHop(observed, volatilityAuction, calendarTarget);
     }
 }

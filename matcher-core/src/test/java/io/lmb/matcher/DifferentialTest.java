@@ -32,6 +32,7 @@ class DifferentialTest
         for (int i = 0; i < h.entries.size(); i++)
         {
             final Harness.Entry e = h.entries.get(i);
+            ref.now = e.timestampNs();
             final List<String> expected = e.command() != null ? ref.onCommand(e.command()) : ref.onTimer(e.timerId());
             final List<String> actual = new ArrayList<>();
             for (int k = 0; k < expected.size() && ev + k < h.events.size(); k++)

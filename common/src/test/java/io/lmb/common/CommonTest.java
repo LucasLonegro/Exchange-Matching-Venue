@@ -5,6 +5,8 @@ import io.lmb.sbe.MessageHeaderEncoder;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.junit.jupiter.api.Test;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Properties;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -66,5 +68,35 @@ class CommonTest
         chain.begin(64, 2);
         chain.update(second, 0, second.capacity());
         return chain.finish().clone();
+    }
+
+    // band-stp
+    @Test
+    void symbolDirectoryOptionalBandColumns() throws Exception
+    {
+        final Path dir = Path.of("target", "symdir-test");
+        Files.createDirectories(dir);
+        final Path plain = dir.resolve("plain.csv");
+        Files.writeString(plain, "symbolId,ticker,shard,tickSize,lotSize,referencePrice,priceBandBps,maxOrderQty\n" +
+            "1,AAA,0,1,1,10000,1000,100000\n");
+        final SymbolDirectory.Symbol a = SymbolDirectory.load(plain).byId(1);
+        assertEquals(SymbolDirectory.DEFAULT_DYNAMIC_BAND_BPS, a.dynamicBandBps());
+        assertEquals(SymbolDirectory.DEFAULT_VOLATILITY_AUCTION_NS, a.volatilityAuctionNs());
+
+        final Path extended = dir.resolve("extended.csv");
+        Files.writeString(extended,
+            "symbolId,ticker,shard,tickSize,lotSize,referencePrice,priceBandBps,maxOrderQty,volatilityAuctionNs,dynamicBandBps\n" +
+            "1,AAA,0,1,1,10000,1000,100000,60000000000,200\n" +
+            "2,BBB,0,1,1,10000,1000,100000,,\n");
+        final SymbolDirectory d = SymbolDirectory.load(extended);
+        assertEquals(200, d.byId(1).dynamicBandBps());
+        assertEquals(60_000_000_000L, d.byId(1).volatilityAuctionNs());
+        assertEquals(0, d.byId(2).dynamicBandBps());
+        assertEquals(SymbolDirectory.DEFAULT_VOLATILITY_AUCTION_NS, d.byId(2).volatilityAuctionNs());
+
+        final Path headerless = dir.resolve("headerless.csv");
+        Files.writeString(headerless, "1,AAA,0,1,1,10000,1000,100000,150,1000\n");
+        assertEquals(150, SymbolDirectory.load(headerless).byId(1).dynamicBandBps());
+        assertEquals(1000, SymbolDirectory.load(headerless).byId(1).volatilityAuctionNs());
     }
 }

@@ -1,9 +1,11 @@
 package io.lmb.marketdata.client;
 
 import io.lmb.marketdata.book.OrderBook;
+import io.lmb.marketdata.sbe.ClosingPriceDecoder;
 import io.lmb.marketdata.sbe.InstrumentDefinitionDecoder;
 import io.lmb.marketdata.sbe.LevelUpdateDecoder;
 import io.lmb.marketdata.sbe.RetransmitStatus;
+import io.lmb.marketdata.sbe.ReferencePriceDecoder;
 import io.lmb.marketdata.sbe.SnapshotBeginDecoder;
 import io.lmb.marketdata.sbe.SnapshotEndDecoder;
 import io.lmb.marketdata.sbe.SnapshotLevelsDecoder;
@@ -84,6 +86,7 @@ public final class FeedClient implements AutoCloseable
         long expected = 1;
         String ticker = "";
         int state;
+        final Reference reference = new Reference();
         final TreeMap<Long, byte[]> pending = new TreeMap<>();
         long gapSinceNs;
         long tailTarget;
@@ -110,9 +113,105 @@ public final class FeedClient implements AutoCloseable
             return state;
         }
 
+        /** day-cycle / band-stp: reference price, static band, last official close and state cause. */
+        public Reference reference()
+        {
+            return reference;
+        }
+
         boolean inGap()
         {
             return !pending.isEmpty() || tailTarget >= expected;
+        }
+    }
+
+    /**
+     * day-cycle / band-stp: the reference price and static band (last InstrumentDefinition or ReferencePrice),
+     * the last ClosingPrice and the cause of the last SymbolStatus, kept by the client and restored from snapshots.
+     * Prices are cents, {@code Long.MIN_VALUE} = none; raw enum values use the marketdata schema's codes.
+     */
+    public static final class Reference
+    {
+        long referencePrice = Long.MIN_VALUE;
+        long bandLow = Long.MIN_VALUE;
+        long bandHigh = Long.MIN_VALUE;
+        long closePrice = Long.MIN_VALUE;
+        long previousClose = Long.MIN_VALUE;
+        int closeTradingDate;
+        short closeSource = 255; // null: no ClosingPrice yet
+        short stateCause = 255;
+        long priceBandBps;
+        long dynamicBandBps;
+        long volatilityAuctionNs;
+
+        public long priceBandBps()
+        {
+            return priceBandBps;
+        }
+
+        public long dynamicBandBps()
+        {
+            return dynamicBandBps;
+        }
+
+        public long volatilityAuctionNs()
+        {
+            return volatilityAuctionNs;
+        }
+
+        public long referencePrice()
+        {
+            return referencePrice;
+        }
+
+        public long bandLow()
+        {
+            return bandLow;
+        }
+
+        public long bandHigh()
+        {
+            return bandHigh;
+        }
+
+        public long closePrice()
+        {
+            return closePrice;
+        }
+
+        public long previousClose()
+        {
+            return previousClose;
+        }
+
+        public int closeTradingDate()
+        {
+            return closeTradingDate;
+        }
+
+        public io.lmb.marketdata.sbe.CloseSource closeSource()
+        {
+            return MdWire.closeSource(closeSource);
+        }
+
+        public io.lmb.marketdata.sbe.StateCause stateCause()
+        {
+            return MdWire.stateCause(stateCause);
+        }
+
+        void copyFrom(final Reference o)
+        {
+            referencePrice = o.referencePrice;
+            bandLow = o.bandLow;
+            bandHigh = o.bandHigh;
+            closePrice = o.closePrice;
+            previousClose = o.previousClose;
+            closeTradingDate = o.closeTradingDate;
+            closeSource = o.closeSource;
+            stateCause = o.stateCause;
+            priceBandBps = o.priceBandBps;
+            dynamicBandBps = o.dynamicBandBps;
+            volatilityAuctionNs = o.volatilityAuctionNs;
         }
     }
 
@@ -124,6 +223,7 @@ public final class FeedClient implements AutoCloseable
         int levelsReceived;
         int state;
         String ticker;
+        final Reference reference = new Reference();
         final OrderBook book = new OrderBook();
     }
 
@@ -141,6 +241,8 @@ public final class FeedClient implements AutoCloseable
     private final LevelUpdateDecoder levelUpdate = new LevelUpdateDecoder();
     private final SymbolStatusDecoder symbolStatus = new SymbolStatusDecoder();
     private final InstrumentDefinitionDecoder instrument = new InstrumentDefinitionDecoder();
+    private final ReferencePriceDecoder referencePrice = new ReferencePriceDecoder();
+    private final ClosingPriceDecoder closingPrice = new ClosingPriceDecoder();
     private final SnapshotBeginDecoder snapshotBegin = new SnapshotBeginDecoder();
     private final SnapshotLevelsDecoder snapshotLevels = new SnapshotLevelsDecoder();
     private final SnapshotEndDecoder snapshotEnd = new SnapshotEndDecoder();
@@ -446,6 +548,7 @@ public final class FeedClient implements AutoCloseable
             {
                 symbolStatus.wrap(b, body, blockLength, version);
                 s.state = symbolStatus.stateRaw();
+                s.reference.stateCause = symbolStatus.causeRaw();
             }
             case InstrumentDefinitionDecoder.TEMPLATE_ID ->
             {
@@ -453,6 +556,33 @@ public final class FeedClient implements AutoCloseable
                 instrument.getTicker(tickerBytes, 0);
                 s.ticker = MdWire.ticker(tickerBytes);
                 s.state = instrument.stateRaw();
+                final Reference r = s.reference;
+                final long ref = instrument.referencePrice();
+                final long bps = instrument.priceBandBps();
+                if (ref != r.referencePrice || bps != r.priceBandBps)
+                {
+                    r.bandLow = Long.MIN_VALUE; // as the publisher does (see SnapshotBegin.bandLow)
+                    r.bandHigh = Long.MIN_VALUE;
+                }
+                r.referencePrice = ref;
+                r.priceBandBps = bps;
+                r.dynamicBandBps = instrument.dynamicBandBps();
+                r.volatilityAuctionNs = instrument.volatilityAuctionNs();
+            }
+            case ReferencePriceDecoder.TEMPLATE_ID ->
+            {
+                referencePrice.wrap(b, body, blockLength, version);
+                s.reference.referencePrice = referencePrice.referencePrice();
+                s.reference.bandLow = referencePrice.bandLow();
+                s.reference.bandHigh = referencePrice.bandHigh();
+            }
+            case ClosingPriceDecoder.TEMPLATE_ID ->
+            {
+                closingPrice.wrap(b, body, blockLength, version);
+                s.reference.closePrice = closingPrice.price();
+                s.reference.previousClose = closingPrice.previousClose();
+                s.reference.closeTradingDate = closingPrice.tradingDate();
+                s.reference.closeSource = closingPrice.sourceRaw();
             }
             default ->
             {
@@ -482,6 +612,18 @@ public final class FeedClient implements AutoCloseable
                 a.lastSeq = snapshotBegin.lastSeq();
                 a.levelsExpected = (int)(snapshotBegin.bidLevels() + snapshotBegin.askLevels());
                 a.state = snapshotBegin.stateRaw();
+                final Reference r = a.reference;
+                r.referencePrice = snapshotBegin.referencePrice();
+                r.bandLow = snapshotBegin.bandLow();
+                r.bandHigh = snapshotBegin.bandHigh();
+                r.closePrice = snapshotBegin.closePrice();
+                r.previousClose = snapshotBegin.previousClose();
+                r.closeTradingDate = snapshotBegin.closeTradingDate();
+                r.closeSource = snapshotBegin.closeSourceRaw();
+                r.stateCause = snapshotBegin.stateCauseRaw();
+                r.priceBandBps = snapshotBegin.priceBandBps();
+                r.dynamicBandBps = snapshotBegin.dynamicBandBps();
+                r.volatilityAuctionNs = snapshotBegin.volatilityAuctionNs();
                 snapshotBegin.getTicker(tickerBytes, 0);
                 a.ticker = MdWire.ticker(tickerBytes);
                 s.assembly = a;
@@ -544,6 +686,7 @@ public final class FeedClient implements AutoCloseable
         s.book.copyFrom(a.book);
         s.state = a.state;
         s.ticker = a.ticker;
+        s.reference.copyFrom(a.reference);
         s.expected = a.lastSeq + 1;
         snapshotRecoveries++;
         listener.onSnapshotApplied(s.symbolId, a.lastSeq);

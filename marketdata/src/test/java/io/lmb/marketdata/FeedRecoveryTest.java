@@ -249,6 +249,57 @@ class FeedRecoveryTest
     }
 
     @Test
+    void referenceCloseAndCauseAreRestoredFromASnapshot() throws Exception
+    {
+        final int vol = DayCycleMdTest.VOL;
+        final VenueDriver v = TestSupport.venueWithSymbols(1);
+        v.volatilityThenRollovers(0, vol, DayCycleMdTest.DAY1);
+        final int a = TestSupport.ports();
+        final MdConfig cfg = TestSupport.config(0, 1, a, true, null);
+        cfg.historyDepth = 2; // the missed messages cannot be retransmitted: the client must use a snapshot
+        final MarketDataPublisher pa = publisher(v, cfg);
+        pa.start();
+        TestSupport.await("caught up", 10_000, () -> pa.metrics().events.get() == v.venue.eventCount(0));
+        final Recorder r = new Recorder();
+        final FeedClient c = client(r, 5, a); // joins after the day-cycle messages were multicast
+        v.order(0, 1, vol, io.lmb.sbe.Side.BUY, 10_100, 5); // one incremental after the missed state
+        v.order(0, 1, 1, io.lmb.sbe.Side.BUY, 10_000, 5);
+        TestSupport.await("orders consumed", 10_000, () -> pa.metrics().events.get() == v.venue.eventCount(0));
+        final SymbolBook sb = pa.engine().builder().symbol(vol);
+        final long seq = sb.seq();
+        final long seq1 = pa.engine().builder().symbol(1).seq();
+        pollUntil(c, "symbols at seq " + seq + "/" + seq1, 10_000, () -> c.symbol(vol) != null
+            && c.symbol(vol).lastSeq() == seq && c.symbol(1) != null && c.symbol(1).lastSeq() == seq1);
+        assertNull(r.violation, r.violation);
+        assertTrue(c.snapshotRecoveries() > 0);
+
+        final FeedClient.Reference ref = c.symbol(vol).reference();
+        assertEquals(VenueDriver.VOL_PRICE, ref.referencePrice());
+        assertEquals(sb.bandLow(), ref.bandLow());
+        assertEquals(sb.bandHigh(), ref.bandHigh());
+        assertTrue(ref.bandLow() < VenueDriver.VOL_PRICE && VenueDriver.VOL_PRICE < ref.bandHigh());
+        assertEquals(VenueDriver.VOL_PRICE, ref.closePrice());
+        assertEquals(VenueDriver.VOL_PRICE, ref.previousClose());
+        assertEquals(DayCycleMdTest.DAY1, ref.closeTradingDate());
+        assertEquals(io.lmb.marketdata.sbe.CloseSource.PREVIOUS_CLOSE, ref.closeSource());
+        assertEquals(io.lmb.marketdata.sbe.StateCause.DAY_ROLLOVER, ref.stateCause());
+        assertEquals(5000, ref.priceBandBps());
+        assertEquals(100, ref.dynamicBandBps());
+        assertEquals(VenueDriver.VOL_AUCTION_NS, ref.volatilityAuctionNs());
+        assertEquals(SymbolState.PRE_OPEN.value(), c.symbol(vol).state());
+
+        // symbol 1 never traded: the listing band around its reference, a NONE close, rolled to PRE_OPEN
+        final FeedClient.Reference ref1 = c.symbol(1).reference();
+        assertEquals(10_000, ref1.referencePrice());
+        final long[] listing1 = DayCycleMdTest.venueReferences(v, 0, 1).get(0);
+        assertEquals(listing1[1], ref1.bandLow());
+        assertEquals(listing1[2], ref1.bandHigh());
+        assertEquals(Long.MIN_VALUE, ref1.closePrice());
+        assertEquals(io.lmb.marketdata.sbe.CloseSource.NONE, ref1.closeSource());
+        assertEquals(io.lmb.marketdata.sbe.StateCause.DAY_ROLLOVER, ref1.stateCause());
+    }
+
+    @Test
     void retransmissionServerAnswersEveryStatusAndServesExactBytes() throws Exception
     {
         final VenueDriver v = TestSupport.venueWithSymbols(1);
@@ -334,14 +385,15 @@ class FeedRecoveryTest
         final MarketDataPublisher pa = publisher(v, cfg);
         pa.start();
         pollUntil(c, "heartbeats", 5_000, () -> c.heartbeats() >= 4);
-        pollUntil(c, "symbol via snapshot channel", 5_000, () -> c.symbol(1) != null && c.symbol(1).lastSeq() == 1);
+        pollUntil(c, "symbol via snapshot channel", 5_000, () -> c.symbol(1) != null
+            && c.symbol(1).lastSeq() == pa.engine().builder().symbol(1).seq());
         assertEquals("AAA", c.symbol(1).ticker());
         final HttpResponse<String> resp = HttpClient.newHttpClient().send(
             HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + (a + 4) + "/metrics")).build(),
             HttpResponse.BodyHandlers.ofString());
         assertEquals(200, resp.statusCode());
         assertTrue(resp.body().contains("lmb_marketdata_heartbeats_total"), resp.body());
-        assertTrue(resp.body().contains("lmb_marketdata_last_event_seq{shard=\"0\"} 2"), resp.body());
+        assertTrue(resp.body().contains("lmb_marketdata_last_event_seq{shard=\"0\"} " + v.venue.eventCount(0)), resp.body());
         assertTrue(resp.body().contains("lmb_marketdata_receive_to_send_ns"), resp.body());
     }
 }

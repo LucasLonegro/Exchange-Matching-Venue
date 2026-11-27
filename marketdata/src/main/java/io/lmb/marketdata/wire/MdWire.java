@@ -57,7 +57,9 @@ public final class MdWire
     public static final int MAX_SEQUENCED_LENGTH = HEADER_LENGTH + Math.max(
         Math.max(LevelUpdateEncoder.BLOCK_LENGTH, TradePrintEncoder.BLOCK_LENGTH),
         Math.max(Math.max(SymbolStatusEncoder.BLOCK_LENGTH, AuctionIndicativeEncoder.BLOCK_LENGTH),
-            InstrumentDefinitionEncoder.BLOCK_LENGTH));
+            Math.max(InstrumentDefinitionEncoder.BLOCK_LENGTH,
+                Math.max(io.lmb.marketdata.sbe.ReferencePriceEncoder.BLOCK_LENGTH,
+                    io.lmb.marketdata.sbe.ClosingPriceEncoder.BLOCK_LENGTH))));
 
     public static final int SNAPSHOT_BEGIN_LENGTH = HEADER_LENGTH + SnapshotBeginEncoder.BLOCK_LENGTH;
 
@@ -68,6 +70,18 @@ public final class MdWire
 
     private MdWire()
     {
+    }
+
+    /** day-cycle / band-stp: raw StateCause, NULL_VAL for null or a value this schema does not know. */
+    public static io.lmb.marketdata.sbe.StateCause stateCause(final short raw)
+    {
+        return raw >= 0 && raw <= 3 ? io.lmb.marketdata.sbe.StateCause.get(raw) : io.lmb.marketdata.sbe.StateCause.NULL_VAL;
+    }
+
+    /** day-cycle / band-stp: raw CloseSource, NULL_VAL for null or a value this schema does not know. */
+    public static io.lmb.marketdata.sbe.CloseSource closeSource(final short raw)
+    {
+        return raw >= 0 && raw <= 3 ? io.lmb.marketdata.sbe.CloseSource.get(raw) : io.lmb.marketdata.sbe.CloseSource.NULL_VAL;
     }
 
     // ---- packet header ----

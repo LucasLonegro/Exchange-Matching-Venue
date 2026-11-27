@@ -27,6 +27,10 @@ message BookSnapshot {
   repeated PriceLevel bids = 1; // best first
   repeated PriceLevel asks = 2; // best first
   string state = 3;             // SymbolState enum name
+  // day-cycle / band-stp: the symbol's state as of md_seq, so a new subscriber does not wait for the next change.
+  string state_cause = 4;           // cause of the last SymbolStatus (see SymbolStatus.cause), empty if none
+  ReferencePrice reference = 5;     // current reference price and static band; unset if none yet
+  ClosingPrice last_close = 6;      // last official close published; unset if none yet
 }
 
 message BookIncremental {
@@ -45,6 +49,9 @@ message TradePrint {
 message SymbolStatus {
   string state = 1;            // SymbolState enum name
   uint32 reason_code = 2;
+  // day-cycle / band-stp: StateChangeCause enum name. COMMAND (operator or schedule), VOLATILITY_INTERRUPTION
+  // (the matcher started a volatility auction), VOLATILITY_AUCTION_END (its timer uncrossed it), DAY_ROLLOVER.
+  string cause = 3;
 }
 
 message AuctionIndicative {
@@ -54,6 +61,28 @@ message AuctionIndicative {
   int64 imbalance_quantity = 4;
   string imbalance_side = 5;
   bool final = 6;
+}
+
+// day-cycle / band-stp: the matcher applied a reference price: at DayRollover (the official close), after a
+// volatility auction that traded (the uncross price), or by command. Limit prices outside
+// [band_low_cents, band_high_cents] are rejected.
+message ReferencePrice {
+  int64 reference_price_cents = 1;
+  bool has_reference_price = 2;
+  int64 band_low_cents = 3;
+  int64 band_high_cents = 4;
+  bool has_band = 5;           // false when the band is not known (e.g. redefined since the last update)
+}
+
+// day-cycle / band-stp: official close of trading_date. The last one before a day rollover is the official
+// close: positions are marked to it and it becomes the next day's reference price.
+message ClosingPrice {
+  int64 price_cents = 1;
+  bool has_price = 2;          // false when source is NONE
+  int64 previous_close_cents = 3;
+  bool has_previous_close = 4;
+  int32 trading_date = 5;      // yyyymmdd of the trading day being closed, 0 before the first rollover
+  string source = 6;           // ClosePriceSource enum name: AUCTION, LAST_TRADE, PREVIOUS_CLOSE or NONE
 }
 
 message MarketDataUpdate {
@@ -69,5 +98,7 @@ message MarketDataUpdate {
     TradePrint trade = 7;
     SymbolStatus status = 8;
     AuctionIndicative auction = 9;
+    ReferencePrice reference = 10; // day-cycle / band-stp
+    ClosingPrice close = 11;       // day-cycle / band-stp
   }
 }

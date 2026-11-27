@@ -5,6 +5,10 @@ import io.lmb.api.ShardStateMachine;
 import io.lmb.api.SnapshotSink;
 import io.lmb.api.TimerScheduler;
 import io.lmb.sbe.BooleanType;
+import io.lmb.sbe.ClosePriceSource;
+import io.lmb.sbe.ClosingPriceEncoder;
+import io.lmb.sbe.ReferencePriceAppliedEncoder;
+import io.lmb.sbe.StateChangeCause;
 import io.lmb.sbe.CommandAppliedEncoder;
 import io.lmb.sbe.CommandRejectedEncoder;
 import io.lmb.sbe.DayRolledEncoder;
@@ -35,7 +39,8 @@ import java.util.TreeMap;
 /**
  * Just enough of ARCHITECTURE.md section 3.1 for control plane tests: symbol definition, state
  * transitions (immediate and timer-scheduled), risk limit echo with a usage model, day rollover,
- * admin mass cancel and rejections. Records every command it applies.
+ * admin mass cancel and rejections. Records every command it applies. Test hooks model the venue's volatility
+ * interruptions and their timer (with the AUCTION_CALL takeover), ReferencePriceApplied, and ClosingPrice on CLOSED.
  */
 final class ScriptedShard implements ShardStateMachine
 {
@@ -48,7 +53,17 @@ final class ScriptedShard implements ShardStateMachine
         long ref;
         int band;
         long maxQty;
+        int dyn;
+        long vol;
         SymbolState state;
+        // band-stp / day-cycle model
+        boolean volAuction;
+        long volTimer;
+        long volEndPrice = Long.MIN_VALUE;
+        boolean venueRef;
+        long lastTrade = Long.MIN_VALUE;
+        long close = Long.MIN_VALUE;
+        long prevClose = Long.MIN_VALUE;
     }
 
     static final class Limits
@@ -111,6 +126,7 @@ final class ScriptedShard implements ShardStateMachine
     private final TreeMap<Integer, Limits> firms = new TreeMap<>();
     private final Map<Integer, Long> demand = new HashMap<>();
     private final TreeMap<Long, Pending> pendingTimers = new TreeMap<>();
+    private final TreeMap<Long, Integer> volTimers = new TreeMap<>();
     final List<String> received = Collections.synchronizedList(new ArrayList<>());
 
     private final UnsafeBuffer out = new UnsafeBuffer(new byte[256]);
@@ -167,6 +183,49 @@ final class ScriptedShard implements ShardStateMachine
         return received().stream().filter(s -> s.startsWith(prefix)).count();
     }
 
+    synchronized boolean inVolatilityAuction(final int symbolId)
+    {
+        final Sym s = symbols.get(symbolId);
+        return s != null && s.volAuction;
+    }
+
+    /**
+     * The matcher interrupts a CONTINUOUS symbol into a volatility auction (cause VOLATILITY_INTERRUPTION) and starts a
+     * timer of the symbol's volatilityAuctionNs. At the timer the symbol returns to CONTINUOUS (VOLATILITY_AUCTION_END),
+     * followed by ReferencePriceApplied at endPrice unless endPrice is the SBE null (the auction did not trade).
+     */
+    synchronized void interrupt(final int symbolId, final long nowNs, final long endPrice)
+    {
+        final Sym s = symbols.get(symbolId);
+        if (s == null || s.state != SymbolState.CONTINUOUS || s.vol <= 0)
+        {
+            throw new IllegalStateException("cannot interrupt " + symbolId);
+        }
+        begin(logPosition, nowNs);
+        received.add("VOL " + symbolId);
+        changed(0, s, SymbolState.AUCTION_CALL, StateChangeCause.VOLATILITY_INTERRUPTION);
+        s.volAuction = true;
+        s.volEndPrice = endPrice;
+        s.volTimer = ++nextTimerId;
+        volTimers.put(s.volTimer, symbolId);
+        timers.schedule(s.volTimer, nowNs + s.vol);
+        applied(0);
+    }
+
+    /** The venue applies a reference of its own (as for an external ReferencePrice). */
+    synchronized void reference(final int symbolId, final long nowNs, final long price)
+    {
+        begin(logPosition, nowNs);
+        referenceApplied(symbols.get(symbolId), price);
+        applied(0);
+    }
+
+    /** A trade print: the price CLOSED reports as LAST_TRADE. */
+    synchronized void trade(final int symbolId, final long price)
+    {
+        symbols.get(symbolId).lastTrade = price;
+    }
+
     // ---------------------------------------------------------------- ShardStateMachine
 
     @Override
@@ -206,6 +265,18 @@ final class ScriptedShard implements ShardStateMachine
     public synchronized void onTimer(final long correlationId, final long logPosition, final long timestampNs)
     {
         begin(logPosition, timestampNs);
+        final Integer volSymbol = volTimers.remove(correlationId);
+        final Sym vs = volSymbol == null ? null : symbols.get(volSymbol);
+        if (vs != null && vs.volAuction && vs.volTimer == correlationId)
+        {
+            received.add("VOLEND " + vs.id + " @" + timestampNs);
+            final long px = vs.volEndPrice;
+            changed(0, vs, SymbolState.CONTINUOUS, StateChangeCause.VOLATILITY_AUCTION_END);
+            if (px != Long.MIN_VALUE)
+            {
+                referenceApplied(vs, px);
+            }
+        }
         final Pending p = pendingTimers.remove(correlationId);
         if (p != null)
         {
@@ -230,13 +301,19 @@ final class ScriptedShard implements ShardStateMachine
         s.ticker = d.ticker();
         s.tick = d.tickSize();
         s.lot = d.lotSize();
-        s.ref = d.referencePrice();
+        if (!s.venueRef)
+        {
+            s.ref = d.referencePrice(); // like the matcher: the venue's own reference wins once applied
+        }
         s.band = (int)d.priceBandBps();
         s.maxQty = d.maxOrderQty();
+        s.dyn = (int)d.dynamicBandBps();
+        s.vol = d.volatilityAuctionNs();
         final SymbolDefinedEncoder e = new SymbolDefinedEncoder().wrapAndApplyHeader(out, 0, headerEnc);
         header(e.eventHeader());
         e.correlationId(d.correlationId()).tickSize(s.tick).lotSize(s.lot).referencePrice(s.ref).maxOrderQty(s.maxQty)
-            .symbolId(id).priceBandBps(s.band).ticker(s.ticker).state(s.state);
+            .symbolId(id).priceBandBps(s.band).ticker(s.ticker).state(s.state)
+            .volatilityAuctionNs(s.vol).dynamicBandBps(s.dyn);
         emit(e.encodedLength());
     }
 
@@ -263,9 +340,9 @@ final class ScriptedShard implements ShardStateMachine
             int changed = 0;
             for (final Sym s : symbols.values())
             {
-                if (SymbolStates.allowed(s.state, target))
+                if (allowed(s, target))
                 {
-                    changed(corr, s, target);
+                    changed(corr, s, target, StateChangeCause.COMMAND);
                     changed++;
                 }
             }
@@ -280,23 +357,63 @@ final class ScriptedShard implements ShardStateMachine
         {
             reject(corr, SymbolStateCommandDecoder.TEMPLATE_ID, RejectReason.UNKNOWN_SYMBOL);
         }
-        else if (!SymbolStates.allowed(s.state, target))
+        else if (!allowed(s, target))
         {
             reject(corr, SymbolStateCommandDecoder.TEMPLATE_ID, RejectReason.INVALID_STATE_TRANSITION);
         }
         else
         {
-            changed(corr, s, target);
+            changed(corr, s, target, StateChangeCause.COMMAND);
         }
     }
 
-    private void changed(final long corr, final Sym s, final SymbolState target)
+    /** The table plus the takeover: AUCTION_CALL -> AUCTION_CALL while a volatility auction runs. */
+    private static boolean allowed(final Sym s, final SymbolState target)
+    {
+        return SymbolStates.allowed(s.state, target) || (target == SymbolState.AUCTION_CALL && s.volAuction);
+    }
+
+    private void changed(final long corr, final Sym s, final SymbolState target, final StateChangeCause cause)
     {
         final SymbolState prev = s.state;
+        endVolatility(s);
         s.state = target;
         final SymbolStateChangedEncoder e = new SymbolStateChangedEncoder().wrapAndApplyHeader(out, 0, headerEnc);
         header(e.eventHeader());
-        e.correlationId(corr).symbolId(s.id).reasonCode(0).previousState(prev).newState(target);
+        e.correlationId(corr).symbolId(s.id).reasonCode(0).previousState(prev).newState(target).cause(cause);
+        emit(e.encodedLength());
+        if (target == SymbolState.CLOSED)
+        {
+            s.close = s.lastTrade != Long.MIN_VALUE ? s.lastTrade : s.prevClose;
+            final ClosePriceSource src = s.lastTrade != Long.MIN_VALUE ? ClosePriceSource.LAST_TRADE
+                : s.prevClose != Long.MIN_VALUE ? ClosePriceSource.PREVIOUS_CLOSE : ClosePriceSource.NONE;
+            final ClosingPriceEncoder c = new ClosingPriceEncoder().wrapAndApplyHeader(out, 0, headerEnc);
+            header(c.eventHeader());
+            c.price(s.close).previousClose(s.prevClose).symbolId(s.id).tradingDate(tradingDate).source(src);
+            emit(c.encodedLength());
+        }
+    }
+
+    /** Any transition (and the day roll) ends a running volatility auction and cancels its timer. */
+    private void endVolatility(final Sym s)
+    {
+        if (s.volAuction)
+        {
+            s.volAuction = false;
+            volTimers.remove(s.volTimer);
+            timers.cancel(s.volTimer);
+        }
+    }
+
+    private void referenceApplied(final Sym s, final long price)
+    {
+        s.ref = price;
+        s.venueRef = true;
+        final long half = price * s.band / 10_000L;
+        final ReferencePriceAppliedEncoder e = new ReferencePriceAppliedEncoder().wrapAndApplyHeader(out, 0, headerEnc);
+        header(e.eventHeader());
+        e.referencePrice(price).nbbBid(Long.MIN_VALUE).nbbOffer(Long.MIN_VALUE).bandLow(price - half).bandHigh(price + half)
+            .sourceTsNs(timestampNs).symbolId(s.id);
         emit(e.encodedLength());
     }
 
@@ -329,6 +446,7 @@ final class ScriptedShard implements ShardStateMachine
         {
             if (s.state != SymbolState.REMOVED)
             {
+                endVolatility(s);
                 s.state = SymbolState.PRE_OPEN;
             }
         }
@@ -340,6 +458,16 @@ final class ScriptedShard implements ShardStateMachine
         header(e.eventHeader());
         e.correlationId(d.correlationId()).tradingDate(d.tradingDate()).expiredOrders(0);
         emit(e.encodedLength());
+        // day-cycle: the official close becomes the next day's reference
+        for (final Sym s : symbols.values())
+        {
+            if (s.state != SymbolState.REMOVED && s.close != Long.MIN_VALUE)
+            {
+                s.prevClose = s.close;
+                s.lastTrade = Long.MIN_VALUE;
+                referenceApplied(s, s.close);
+            }
+        }
     }
 
     private void massCancel(final MassCancelDecoder d)

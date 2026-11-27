@@ -2,8 +2,8 @@
 # Brings up the local copy of the venue from the assembled distribution, no Docker needed.
 #
 #   scripts/local-up.sh                  2 shards x 2 members, 2 gateways, 2 MD publishers (A/B),
-#                                        2 consolidators + feed simulator, 2 control planes,
-#                                        post-trade, 1 shadow replayer per shard
+#                                        2 control planes (no NBBO consolidators or feed simulator:
+#                                        the venue sets its own reference prices), post-trade, 1 shadow replayer per shard
 #   scripts/local-up.sh --minimal        1 shard x 1 member and one of everything, no post-trade
 #   scripts/local-up.sh --members 3      3 members per shard (survives a leader kill: kill-leader.sh)
 #   scripts/local-up.sh --dry-run        print the exact commands, start nothing
@@ -34,7 +34,8 @@ usage() { sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed -e '$d' -e 's/^# \{0
 Options:
   --shards N --members N --gateways N --md N --consolidators N --controlplanes N
   --minimal               1 shard x 1 member, one instance of each service, no post-trade
-  --no-posttrade --no-replayer --no-feedsim --no-marketdata --no-gateways --no-consolidators
+  --no-posttrade --no-replayer --no-marketdata --no-gateways
+  --consolidators N --with-feedsim   also run NBBO consolidators and the feed simulator (legacy, external-market mode)
   --skip <name|service>   do not start it (repeatable)
   --full                  use deploy/local/full.env (start the infrastructure first:
                           docker compose -f deploy/local/docker-compose.yml up -d)
@@ -57,7 +58,7 @@ EOF
 # ---- arguments ---------------------------------------------------------------------------------------
 BASE_TOPO="$LMB_ROOT/deploy/local/topology.properties"
 SHARDS=""; MEMBERS=""; GATEWAYS=""; MDS=""; CONS=""; CPS=""
-WITH_POSTTRADE=1; WITH_REPLAYER=1; WITH_FEEDSIM=1
+WITH_POSTTRADE=1; WITH_REPLAYER=1; WITH_FEEDSIM=0
 FULL=0; DRY_RUN=0; FORCE=0; KEEP_ON_FAILURE=0; STRICT_LEADERS=0
 TIER_TIMEOUT=120; LEADER_TIMEOUT=60
 RESTART=""
@@ -74,10 +75,11 @@ while [ $# -gt 0 ]; do
     --md)             need "$@"; posint "$1" "$2"; MDS="$2"; shift ;;
     --consolidators)  need "$@"; posint "$1" "$2"; CONS="$2"; shift ;;
     --controlplanes)  need "$@"; posint "$1" "$2"; CPS="$2"; shift ;;
-    --minimal)        SHARDS=1; MEMBERS=1; GATEWAYS=1; MDS=1; CONS=1; CPS=1; WITH_POSTTRADE=0 ;;
+    --minimal)        SHARDS=1; MEMBERS=1; GATEWAYS=1; MDS=1; CONS=0; CPS=1; WITH_POSTTRADE=0 ;;
     --no-posttrade)   WITH_POSTTRADE=0 ;;
     --no-replayer|--no-replayers) WITH_REPLAYER=0 ;;
     --no-feedsim)     WITH_FEEDSIM=0 ;;
+    --with-feedsim)   WITH_FEEDSIM=1 ;;
     --no-marketdata|--no-md) SKIP+=(marketdata) ;;
     --no-gateways|--no-gateway) SKIP+=(gateway) ;;
     --no-consolidators|--no-consolidator) SKIP+=(consolidator) ;;

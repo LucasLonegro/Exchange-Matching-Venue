@@ -1,7 +1,11 @@
 package io.lmb.matcher;
 
+import io.lmb.sbe.ClosingPriceDecoder;
+import io.lmb.sbe.DayRolledDecoder;
 import io.lmb.sbe.ExecType;
 import io.lmb.sbe.ExecutionReportDecoder;
+import io.lmb.sbe.SymbolState;
+import io.lmb.sbe.SymbolStateChangedDecoder;
 import io.lmb.sbe.TradeDecoder;
 
 import java.util.HashMap;
@@ -14,7 +18,9 @@ import java.util.Set;
  * Event-stream invariants, independent of the machine's internals: per order, cum = sum of fills and
  * leaves + cum = orderQty while live; nothing after a terminal report; every Trade is followed by
  * exactly the two fills it describes with the same matchId, quantity and price; books rebuilt from
- * BookDeltas never cross in CONTINUOUS (checked by the caller through Invariants).
+ * BookDeltas never cross in CONTINUOUS (checked by the caller through Invariants). Day cycle: every
+ * ClosingPrice agrees with the trades of the trading day and the previous close, and no trading day ends
+ * (DayRolled) with a trade printed after the symbol's last ClosingPrice.
  */
 final class StreamChecker
 {
@@ -22,6 +28,12 @@ final class StreamChecker
     private final Set<Long> terminated = new HashSet<>();
     long trades;
     long tradedQty;
+    long closes;
+    // day-cycle, per symbol: last trade of the trading day {price, isAuction}, latest close, previous close
+    private final Map<Long, long[]> lastTrade = new HashMap<>();
+    private final Map<Long, Long> todayClose = new HashMap<>();
+    private final Map<Long, Long> prevClose = new HashMap<>();
+    private final Set<Long> tradedSinceClose = new HashSet<>();
 
     void check(final List<Ev> events)
     {
@@ -41,6 +53,46 @@ final class StreamChecker
                     "fills are the trade's two orders");
                 trades++;
                 tradedQty += t.quantity();
+                lastTrade.put(t.symbolId(), new long[] {t.price(), t.isAuctionRaw()});
+                tradedSinceClose.add(t.symbolId());
+            }
+            if (e.is(ClosingPriceDecoder.TEMPLATE_ID))
+            {
+                final ClosingPriceDecoder c = e.closingPrice();
+                final long sym = c.symbolId();
+                final long[] last = lastTrade.get(sym);
+                final Long prev = prevClose.get(sym);
+                final long prevPx = prev == null ? Cmd.NULL : prev;
+                require(c.previousClose() == prevPx, "previousClose is the last official close: " + e);
+                switch (c.source())
+                {
+                    case AUCTION -> require(last != null && last[1] == 1 && c.price() == last[0], "auction close = auction print: " + e);
+                    case LAST_TRADE -> require(last != null && c.price() == last[0], "last-trade close = last print: " + e);
+                    case PREVIOUS_CLOSE -> require(last == null && prev != null && c.price() == prevPx, "previous close: " + e);
+                    case NONE -> require(last == null && prev == null && c.price() == Cmd.NULL, "no price: " + e);
+                    default -> require(false, "bad close source: " + e);
+                }
+                todayClose.put(sym, c.price());
+                tradedSinceClose.remove(sym);
+                closes++;
+            }
+            if (e.is(DayRolledDecoder.TEMPLATE_ID))
+            {
+                require(tradedSinceClose.isEmpty(), "trading day ended with a stale close for " + tradedSinceClose);
+                for (final Map.Entry<Long, Long> c : todayClose.entrySet())
+                {
+                    prevClose.put(c.getKey(), c.getValue() == Cmd.NULL ? null : c.getValue());
+                }
+                todayClose.clear();
+                lastTrade.clear();
+            }
+            if (e.is(SymbolStateChangedDecoder.TEMPLATE_ID) && e.stateChanged().newState() == SymbolState.REMOVED)
+            {
+                final long sym = e.stateChanged().symbolId();
+                lastTrade.remove(sym);
+                todayClose.remove(sym);
+                prevClose.remove(sym);
+                tradedSinceClose.remove(sym);
             }
             if (e.is(ExecutionReportDecoder.TEMPLATE_ID))
             {

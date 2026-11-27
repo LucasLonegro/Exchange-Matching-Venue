@@ -171,6 +171,19 @@ class GatewayGrpcTest
     }
 
     @Test
+    void selfTradeCancelCarriesItsReason() throws Exception
+    {
+        final Gateway g = fx.gateway(1);
+        final TestClient a = fx.alpha(g);
+        a.buy(1, "AAPL", 10, 2); // ScriptedShard cancels a limit at 2 cents with SELF_TRADE
+        a.awaitReport(1, ExecType.EXEC_NEW);
+        final ExecutionReport canceled = a.awaitReport(1, ExecType.EXEC_CANCELED);
+        assertEquals("SELF_TRADE", canceled.getCancelReason());
+        assertEquals(OrdStatus.STATUS_CANCELED, canceled.getOrdStatus());
+        assertEquals(0, canceled.getLeavesQty());
+    }
+
+    @Test
     void massCancelFansOutToEveryShardWithAggregatedAcks() throws Exception
     {
         final Gateway g = fx.gateway(1);

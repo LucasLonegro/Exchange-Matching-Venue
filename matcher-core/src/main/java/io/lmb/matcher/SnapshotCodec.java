@@ -9,20 +9,23 @@ import java.nio.ByteOrder;
 import java.util.zip.CRC32;
 
 /**
- * Hand-written little-endian snapshot format, version 2 (v1 is still read: v2 added tradingDate). Everything is written in a canonical order that
+ * Hand-written little-endian snapshot format; only the current version is read. Everything is written in a canonical order that
  * does not depend on hash table layout, pool indices or configured capacities, so two machines with the
  * same history produce byte-identical snapshots and a restored machine produces the same next snapshot.
  *
  * <pre>
  * magic "LMBM" int32, version int32, shardId int32
- * eventSeq, orderSeq, matchSeq, timerSeq int64; tradingDate int32 (v2+); chain hash 32 bytes
- * symbols   (definition order): symbolId, ticker[8], tick, lot, maxQty, bps, ref, lastRefSourceTs, state, auction indicative
+ * eventSeq, orderSeq, matchSeq, timerSeq int64; tradingDate int32; chain hash 32 bytes
+ * symbols   (definition order): symbolId, ticker[8], tick, lot, maxQty, bps, ref, lastRefSourceTs, state, auction indicative,
+ *                               dynamicBandBps, volatilityAuctionNs, volTimerId, volEndNs (lastTradePx is in dayCycle)
  * firms     (creation order):   firmId, budget, maxPos, enabled, openNotional, tradedNet
  * firmSyms  (creation order):   firmIdx, symbolIdx, netPosition, openBuyQty, openSellQty
  * orders    (orderId order):    every live order's fields
  * levels    per symbol, BUY then SELL, best first: price, count, orderIds in FIFO order
  * dedupe    (insertion order):  firmId, clOrdId, code (LIVE codes carry the orderId)
  * pending   (timerId order):    scheduled transitions
+ * dayCycle  (definition order, one per symbol): lastTradePx, closePx, prevClosePx int64; closeSource int8;
+ *           flags int8 (bit 0 tradedToday, bit 1 hasClose)
  * crc32 of everything above
  * </pre>
  * The bytes are split into chunks of at most {@link SnapshotSink#MAX_CHUNK_LENGTH}.
@@ -148,6 +151,11 @@ final class SnapshotCodec
             out.i64(s.auctMatched);
             out.i64(s.auctImbalance);
             out.i8(s.auctSide);
+            // band-stp
+            out.i64(s.dynamicBandBps);
+            out.i64(s.volatilityAuctionNs);
+            out.i64(s.volTimerId);
+            out.i64(s.volEndNs);
         }
 
         out.i32(m.firms.size());
@@ -229,6 +237,17 @@ final class SnapshotCodec
             out.i64(p.effectiveTimeNs);
         }
 
+        // day-cycle section
+        for (int i = 0; i < m.symbols.size(); i++)
+        {
+            final Symbol s = m.symbols.get(i);
+            out.i64(s.lastTradePx);
+            out.i64(s.closePx);
+            out.i64(s.prevClosePx);
+            out.i8(s.closeSource);
+            out.i8((s.tradedToday ? 1 : 0) | (s.hasClose ? 2 : 0));
+        }
+
         final CRC32 crc = new CRC32();
         crc.update(out.buf.byteArray(), 0, out.pos);
         out.i32((int)crc.getValue());
@@ -275,7 +294,7 @@ final class SnapshotCodec
             throw new IllegalStateException("not a matcher-core snapshot");
         }
         final int version = in.i32();
-        if (version < 1 || version > VERSION)
+        if (version != VERSION)
         {
             throw new IllegalStateException("unsupported matcher-core snapshot version " + version);
         }
@@ -288,7 +307,7 @@ final class SnapshotCodec
         m.orderSeq = in.i64();
         m.matchSeq = in.i64();
         m.timerSeq = in.i64();
-        m.tradingDate = version >= 2 ? in.i32() : 0;
+        m.tradingDate = in.i32();
         final byte[] hash = new byte[HashChain.HASH_LENGTH];
         in.bytes(hash, HashChain.HASH_LENGTH);
         m.ew.chain.set(hash, 0);
@@ -312,6 +331,12 @@ final class SnapshotCodec
             s.auctMatched = in.i64();
             s.auctImbalance = in.i64();
             s.auctSide = in.i8();
+            // band-stp
+            s.dynamicBandBps = in.i64();
+            s.volatilityAuctionNs = in.i64();
+            s.volTimerId = in.i64();
+            s.volEndNs = in.i64();
+            m.restoreVolatilityTimer(s);
             s.computeBand();
             if (s.refPrice != Codes.NULL_PRICE)
             {
@@ -411,6 +436,21 @@ final class SnapshotCodec
         for (int i = 0; i < nPending; i++)
         {
             m.pending.add(new PendingTransition(in.i64(), in.i64(), in.i64(), in.i32(), in.i8(), in.i64()));
+        }
+        for (int i = 0; i < nSym; i++)
+        {
+            final Symbol s = m.symbols.get(i);
+            s.lastTradePx = in.i64();
+            s.closePx = in.i64();
+            s.prevClosePx = in.i64();
+            s.closeSource = in.i8();
+            final byte flags = in.i8();
+            if (s.closeSource < Codes.CLOSE_NONE || s.closeSource > Codes.CLOSE_PREVIOUS_CLOSE || (flags & ~3) != 0)
+            {
+                throw new IllegalStateException("invalid day-cycle entry in snapshot");
+            }
+            s.tradedToday = (flags & 1) != 0;
+            s.hasClose = (flags & 2) != 0;
         }
         in.i32(); // crc, already verified
         if (in.pos != in.length)

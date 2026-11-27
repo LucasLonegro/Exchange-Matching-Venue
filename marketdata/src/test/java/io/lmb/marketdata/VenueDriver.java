@@ -68,8 +68,42 @@ final class VenueDriver
     {
         final SymbolDefinitionEncoder e = new SymbolDefinitionEncoder().wrapAndApplyHeader(buf, 0, hdr);
         e.correlationId(nextCorrelationId++).tickSize(1).lotSize(1).referencePrice(refPrice).maxOrderQty(1_000_000)
-            .symbolId(symbolId).priceBandBps(5000).ticker(ticker).initialState(state);
+            .symbolId(symbolId).priceBandBps(5000).ticker(ticker).initialState(state)
+            .volatilityAuctionNs(0).dynamicBandBps(0); // buf is reused: set every field
         send(shard, MessageHeaderEncoder.ENCODED_LENGTH + e.encodedLength());
+    }
+
+    /** A symbol with the dynamic collar (dynamicBandBps around the last trade) and volatility auctions. */
+    void symbol(
+        final int shard, final int symbolId, final String ticker, final long refPrice, final SymbolState state,
+        final long dynamicBandBps, final long volatilityAuctionNs)
+    {
+        final SymbolDefinitionEncoder e = new SymbolDefinitionEncoder().wrapAndApplyHeader(buf, 0, hdr);
+        e.correlationId(nextCorrelationId++).tickSize(1).lotSize(1).referencePrice(refPrice).maxOrderQty(1_000_000)
+            .symbolId(symbolId).priceBandBps(5000).ticker(ticker).initialState(state)
+            .volatilityAuctionNs(volatilityAuctionNs).dynamicBandBps(dynamicBandBps);
+        send(shard, MessageHeaderEncoder.ENCODED_LENGTH + e.encodedLength());
+    }
+
+    static final long VOL_AUCTION_NS = 1_000_000;
+    static final long VOL_PRICE = 10_200;
+
+    /**
+     * Defines symbolId (reference 10_000, 1% collar, 1 ms volatility auction) and drives it through a volatility
+     * interruption and two day rollovers. Firms 1 and 2 must exist on the shard. A cross at 10_200 leaves the
+     * collar, so the symbol goes to AUCTION_CALL (VOLATILITY_INTERRUPTION); the timer ends the auction, which
+     * uncrosses at 10_200 and re-centres the band (ReferencePriceApplied). Rollover firstDate closes the day
+     * (LAST_TRADE 10_200, tradingDate 0) and rollover firstDate + 1 closes firstDate (PREVIOUS_CLOSE 10_200);
+     * each sets the reference to the close.
+     */
+    void volatilityThenRollovers(final int shard, final int symbolId, final int firstDate)
+    {
+        symbol(shard, symbolId, "VOL" + symbolId, 10_000, SymbolState.CONTINUOUS, 100, VOL_AUCTION_NS);
+        order(shard, 1, symbolId, Side.SELL, VOL_PRICE, 10);
+        order(shard, 2, symbolId, Side.BUY, VOL_PRICE, 10);
+        venue.advanceTimeBy(2 * VOL_AUCTION_NS);
+        dayRollover(shard, firstDate);
+        dayRollover(shard, firstDate + 1);
     }
 
     void state(final int shard, final int symbolId, final SymbolState state)

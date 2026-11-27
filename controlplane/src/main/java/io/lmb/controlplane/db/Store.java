@@ -17,9 +17,14 @@ import static io.lmb.controlplane.db.Database.update;
 /** All SQL of the control plane. Methods take a Connection so callers choose the transaction. */
 public final class Store
 {
+    /**
+     * Desired symbol parameters. referencePrice is the listing price: sent with the first SymbolDefinition, after
+     * which the venue owns the reference (see {@link ObservedSymbolRow#venueReference}).
+     */
     public record SymbolRow(
         int symbolId, String ticker, int shardId, long tickSize, long lotSize, long referencePrice,
-        int priceBandBps, long maxOrderQty, String status, String operatorState, long updatedMs)
+        int priceBandBps, long maxOrderQty, int dynamicBandBps, long volatilityAuctionNs, String status,
+        String operatorState, long updatedMs)
     {
         public boolean active()
         {
@@ -61,9 +66,16 @@ public final class Store
     {
     }
 
+    /**
+     * What a shard confirmed. Prices use the SBE null (Long.MIN_VALUE) for "none"; closeSource is null until a
+     * ClosingPrice was seen.
+     */
     public record ObservedSymbolRow(
         int shardId, int symbolId, String ticker, long tickSize, long lotSize, long referencePrice, int priceBandBps,
-        long maxOrderQty, String state, long lastCorrelationId, long eventSeq)
+        long maxOrderQty, String state, long lastCorrelationId, long eventSeq,
+        int dynamicBandBps, long volatilityAuctionNs, boolean volatilityAuction, long volatilityAuctionSinceNs,
+        boolean venueReference, long bandLow, long bandHigh,
+        long closePrice, long previousClose, String closeSource, int closeTradingDate)
     {
     }
 
@@ -97,21 +109,25 @@ public final class Store
     {
         return new SymbolRow(rs.getInt("symbol_id"), rs.getString("ticker"), rs.getInt("shard_id"), rs.getLong("tick_size"),
             rs.getLong("lot_size"), rs.getLong("reference_price"), rs.getInt("price_band_bps"), rs.getLong("max_order_qty"),
+            rs.getInt("dynamic_band_bps"), rs.getLong("volatility_auction_ns"),
             rs.getString("status"), rs.getString("operator_state"), rs.getLong("updated_ms"));
     }
 
     public static void upsertSymbol(final Connection c, final SymbolRow s, final long nowMs) throws SQLException
     {
         final int n = update(c, "UPDATE symbol SET ticker = ?, shard_id = ?, tick_size = ?, lot_size = ?, reference_price = ?, " +
-                "price_band_bps = ?, max_order_qty = ?, status = ?, updated_ms = ? WHERE symbol_id = ?",
+                "price_band_bps = ?, max_order_qty = ?, dynamic_band_bps = ?, volatility_auction_ns = ?, status = ?, updated_ms = ? " +
+                "WHERE symbol_id = ?",
             s.ticker(), s.shardId(), s.tickSize(), s.lotSize(), s.referencePrice(), s.priceBandBps(), s.maxOrderQty(),
-            s.status(), nowMs, s.symbolId());
+            s.dynamicBandBps(), s.volatilityAuctionNs(), s.status(), nowMs, s.symbolId());
         if (n == 0)
         {
             update(c, "INSERT INTO symbol (symbol_id, ticker, shard_id, tick_size, lot_size, reference_price, price_band_bps, " +
-                    "max_order_qty, status, operator_state, updated_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "max_order_qty, dynamic_band_bps, volatility_auction_ns, status, operator_state, updated_ms) " +
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 s.symbolId(), s.ticker(), s.shardId(), s.tickSize(), s.lotSize(), s.referencePrice(), s.priceBandBps(),
-                s.maxOrderQty(), s.status(), s.operatorState() == null ? NULL_VARCHAR : s.operatorState(), nowMs);
+                s.maxOrderQty(), s.dynamicBandBps(), s.volatilityAuctionNs(), s.status(),
+                s.operatorState() == null ? NULL_VARCHAR : s.operatorState(), nowMs);
         }
     }
 
@@ -352,21 +368,47 @@ public final class Store
         return query(c, "SELECT * FROM shard_symbol_state ORDER BY shard_id, symbol_id", rs -> new ObservedSymbolRow(
             rs.getInt("shard_id"), rs.getInt("symbol_id"), rs.getString("ticker"), rs.getLong("tick_size"), rs.getLong("lot_size"),
             rs.getLong("reference_price"), rs.getInt("price_band_bps"), rs.getLong("max_order_qty"), rs.getString("state"),
-            rs.getLong("last_correlation_id"), rs.getLong("event_seq")));
+            rs.getLong("last_correlation_id"), rs.getLong("event_seq"),
+            rs.getInt("dynamic_band_bps"), rs.getLong("volatility_auction_ns"), rs.getBoolean("volatility_auction"),
+            rs.getLong("volatility_auction_since_ns"), rs.getBoolean("venue_reference"),
+            price(rs, "band_low"), price(rs, "band_high"), price(rs, "close_price"), price(rs, "previous_close"),
+            rs.getString("close_source"), rs.getInt("close_trading_date")));
     }
+
+    private static final String OBSERVED_SYMBOL_COLUMNS = "ticker, tick_size, lot_size, reference_price, price_band_bps, " +
+        "max_order_qty, state, last_correlation_id, event_seq, dynamic_band_bps, volatility_auction_ns, volatility_auction, " +
+        "volatility_auction_since_ns, venue_reference, band_low, band_high, close_price, previous_close, close_source, " +
+        "close_trading_date";
 
     public static void saveObservedSymbol(final Connection c, final ObservedSymbolRow r) throws SQLException
     {
-        if (update(c, "UPDATE shard_symbol_state SET ticker = ?, tick_size = ?, lot_size = ?, reference_price = ?, " +
-                "price_band_bps = ?, max_order_qty = ?, state = ?, last_correlation_id = ?, event_seq = ? " +
-                "WHERE shard_id = ? AND symbol_id = ?", r.ticker(), r.tickSize(), r.lotSize(), r.referencePrice(),
-            r.priceBandBps(), r.maxOrderQty(), r.state(), r.lastCorrelationId(), r.eventSeq(), r.shardId(), r.symbolId()) == 0)
+        final Object[] values = {r.ticker(), r.tickSize(), r.lotSize(), r.referencePrice(), r.priceBandBps(), r.maxOrderQty(),
+            r.state(), r.lastCorrelationId(), r.eventSeq(), r.dynamicBandBps(), r.volatilityAuctionNs(), r.volatilityAuction(),
+            r.volatilityAuctionSinceNs(), r.venueReference(), price(r.bandLow()), price(r.bandHigh()), price(r.closePrice()),
+            price(r.previousClose()), r.closeSource() == null ? NULL_VARCHAR : r.closeSource(), r.closeTradingDate()};
+        final List<Object> params = new ArrayList<>(List.of(values));
+        params.add(r.shardId());
+        params.add(r.symbolId());
+        if (update(c, "UPDATE shard_symbol_state SET " + OBSERVED_SYMBOL_COLUMNS.replace(",", " = ?,") + " = ? " +
+            "WHERE shard_id = ? AND symbol_id = ?", params.toArray()) == 0)
         {
-            update(c, "INSERT INTO shard_symbol_state (shard_id, symbol_id, ticker, tick_size, lot_size, reference_price, " +
-                    "price_band_bps, max_order_qty, state, last_correlation_id, event_seq) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                r.shardId(), r.symbolId(), r.ticker(), r.tickSize(), r.lotSize(), r.referencePrice(), r.priceBandBps(),
-                r.maxOrderQty(), r.state(), r.lastCorrelationId(), r.eventSeq());
+            final List<Object> insert = new ArrayList<>(List.of(r.shardId(), r.symbolId()));
+            insert.addAll(List.of(values));
+            update(c, "INSERT INTO shard_symbol_state (shard_id, symbol_id, " + OBSERVED_SYMBOL_COLUMNS + ") VALUES (" +
+                "?, ".repeat(insert.size() - 1) + "?)", insert.toArray());
         }
+    }
+
+    /** SBE null price (Long.MIN_VALUE) as SQL NULL. */
+    private static Object price(final long p)
+    {
+        return p == Long.MIN_VALUE ? NULL_BIGINT : (Object)p;
+    }
+
+    private static long price(final ResultSet rs, final String column) throws SQLException
+    {
+        final long v = rs.getLong(column);
+        return rs.wasNull() ? Long.MIN_VALUE : v;
     }
 
     public static List<ObservedFirmRow> observedFirms(final Connection c) throws SQLException

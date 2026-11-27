@@ -2,10 +2,12 @@ package io.lmb.marketdata;
 
 import io.lmb.marketdata.book.OrderBook;
 import io.lmb.marketdata.sbe.BookSide;
+import io.lmb.marketdata.sbe.CloseSource;
 import io.lmb.marketdata.sbe.MessageHeaderEncoder;
 import io.lmb.marketdata.sbe.SnapshotBeginEncoder;
 import io.lmb.marketdata.sbe.SnapshotEndEncoder;
 import io.lmb.marketdata.sbe.SnapshotLevelsEncoder;
+import io.lmb.marketdata.sbe.StateCause;
 import io.lmb.marketdata.sbe.TradingState;
 import io.lmb.marketdata.wire.MdWire;
 import org.agrona.ExpandableArrayBuffer;
@@ -42,7 +44,11 @@ public final class SnapshotWriter
         begin.wrapAndApplyHeader(out, pos + MdWire.FRAME_PREFIX_LENGTH, header)
             .lastSeq(s.seq).transactTimeNs(s.lastTransactTimeNs).tickSize(s.tickSize).lotSize(s.lotSize)
             .symbolId(s.symbolId).bidLevels(bids).askLevels(asks).putTicker(s.ticker, 0)
-            .state(TradingState.get((short)s.state));
+            .state(TradingState.get((short)s.state))
+            .referencePrice(s.referencePrice).bandLow(s.bandLow).bandHigh(s.bandHigh)
+            .closePrice(s.closePrice).previousClose(s.previousClose).volatilityAuctionNs(s.volatilityAuctionNs)
+            .closeTradingDate(s.closeTradingDate).priceBandBps(s.priceBandBps).dynamicBandBps(s.dynamicBandBps)
+            .closeSource(MdWire.closeSource(s.closeSource)).stateCause(MdWire.stateCause(s.stateCause));
         pos = frame(out, pos, begin.encodedLength());
 
         final int total = bids + asks;

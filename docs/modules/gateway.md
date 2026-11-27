@@ -69,6 +69,10 @@ enums, `io.lmb.fix.FixDictionaryImpl`). Venue tags: 20001 `LmbShardID`, 20002 `L
 - `MassCancel`: empty symbol = scope FIRM to every shard; a symbol = FIRM_SYMBOL to its shard. One
   `MassCancelAck` per shard; `shards_pending` counts down to 0 on the last. A shard that is down gets an
   immediate `SessionReject(UNAVAILABLE)` and is left out of the count.
+- `ExecutionReport.cancel_reason` / `reject_reason` carry the venue's `CancelReason` / `RejectReason` name. A
+  self-trade prevention cancel (the incoming order would have traded with a resting order of the same firm; the
+  matcher cancels the incoming order and leaves the resting one) is `exec_type CANCELED`, `cancel_reason
+  "SELF_TRADE"`, `leaves_qty 0`, on the incoming order's own `cl_ord_id`.
 - `Logon.cancel_on_disconnect`: when the stream ends for any reason (client close, cancel, heartbeat
   timeout, slow consumer, gateway shutdown) the gateway sends `MassCancel(scope=SESSION,
   reason=DISCONNECT)` to every shard. These internal commands are never expired or abandoned.
@@ -117,7 +121,10 @@ ExecutionReport(8, fills as ExecType F, with LmbShardID/LmbEventSeq), OrderCance
 OrderMassCancelReport(r, one aggregated report) and BusinessMessageReject(j, Text = gateway reason) out.
 ClOrdID and OrigClOrdID must be decimal integers (the venue's id is int64); otherwise
 BusinessMessageReject. PossResend(97)=Y on an inbound order maps to possResend=TRUE. Prices must have at
-most cent precision, quantities must be whole.
+most cent precision, quantities must be whole. A canceled or rejected ExecutionReport names the venue reason in
+Text(58) (e.g. `END_OF_DAY`); a self-trade prevention cancel is ExecType(150)=4, OrdStatus(39)=4,
+Text(58)=`SELF_TRADE`, LeavesQty(151)=0, with no ExecRestatementReason(378) (fix-codecs is unchanged).
+Tests: `GatewayGrpcTest.selfTradeCancelCarriesItsReason`, `FixGatewayTest.fixSelfTradeCancelNamesItsReasonInText`.
 
 The FIX stack runs an embedded Aeron media driver and Archive under `<lmb.data.dir>/gateway-<id>/fix`
 (term buffers `lmb.gateway.fix.termBufferLength`, IPC only, archive control channel disabled).

@@ -1,4 +1,4 @@
 firmId,name,apiKey,sessionIds,creditLimit,maxPositionPerSymbol
-100,Alpha Capital,alpha-key,1001;1002,100000000000,5000000
-200,Beta Trading,beta-key,2001;2002,100000000000,5000000
-300,Gamma Markets,gamma-key,3001,50000000000,2000000
+100,Alpha Capital,alpha-key,1001;1002,10000000000000000,5000000
+200,Beta Trading,beta-key,2001;2002,10000000000000000,5000000
+300,Gamma Markets,gamma-key,3001,10000000000000000,2000000

@@ -2,6 +2,7 @@ package io.lmb.controlplane;
 
 import io.javalin.Javalin;
 import io.javalin.http.Context;
+import io.lmb.common.SymbolDirectory;
 import io.lmb.controlplane.db.Database;
 import io.lmb.controlplane.db.Store;
 import org.slf4j.Logger;
@@ -31,6 +32,7 @@ public final class RestApi
     private static final Pattern TICKER = Pattern.compile("[A-Z0-9.]{1,8}");
     private static final Pattern TIME = Pattern.compile("([01][0-9]|2[0-3]):[0-5][0-9]|-");
     private static final Pattern ACTOR = Pattern.compile("[A-Za-z0-9_.@-]{1,100}");
+    static final long MAX_VOLATILITY_AUCTION_NS = 86_400_000_000_000L;
 
     private final ControlPlaneConfig cfg;
     private final Database db;
@@ -81,16 +83,23 @@ public final class RestApi
             config.routes.get("/api/symbols", ctx -> json(ctx, 200, symbols(null)));
             config.routes.get("/api/symbols/{id}", ctx -> json(ctx, 200, symbols(intParam(ctx, "id")).get(0)));
             config.routes.post("/api/symbols", ctx -> submit(ctx, "UPSERT_SYMBOL", validSymbol(body(ctx))));
+            config.routes.put("/api/symbols/{id}", ctx -> submit(ctx, "UPSERT_SYMBOL", validSymbolPut(intParam(ctx, "id"), body(ctx))));
             config.routes.delete("/api/symbols/{id}", ctx -> submit(ctx, "REMOVE_SYMBOL", Map.of("symbolId", intParam(ctx, "id"))));
             config.routes.post("/api/symbols/{id}/halt", ctx -> submit(ctx, "HALT_SYMBOL", Map.of("symbolId", intParam(ctx, "id"))));
             config.routes.post("/api/symbols/{id}/resume", ctx -> submit(ctx, "RESUME_SYMBOL",
-                Map.of("symbolId", intParam(ctx, "id"), "auction", boolQuery(ctx, "auction"))));
+                Map.of("symbolId", intParam(ctx, "id"), "auction", boolQuery(ctx, "auction"), "force", boolQuery(ctx, "force"))));
             config.routes.post("/api/symbols/{id}/auction/start", ctx -> submit(ctx, "AUCTION_START",
                 Map.of("symbolId", intParam(ctx, "id"))));
             config.routes.post("/api/symbols/{id}/auction/stop", ctx -> submit(ctx, "AUCTION_STOP",
-                Map.of("symbolId", intParam(ctx, "id"), "target", oneOf(ctx.queryParam("target"), "CONTINUOUS", "CONTINUOUS", "CLOSED"))));
+                Map.of("symbolId", intParam(ctx, "id"), "target", oneOf(ctx.queryParam("target"), "CONTINUOUS", "CONTINUOUS", "CLOSED"),
+                    "force", boolQuery(ctx, "force"))));
             config.routes.post("/api/market/halt", ctx -> submit(ctx, "HALT_MARKET", shardQuery(ctx)));
-            config.routes.post("/api/market/resume", ctx -> submit(ctx, "RESUME_MARKET", shardQuery(ctx)));
+            config.routes.post("/api/market/resume", ctx ->
+            {
+                final Map<String, Object> p = new java.util.HashMap<>(shardQuery(ctx));
+                p.put("force", boolQuery(ctx, "force"));
+                submit(ctx, "RESUME_MARKET", p);
+            });
 
             config.routes.get("/api/firms", ctx -> json(ctx, 200, firms(null)));
             config.routes.get("/api/firms/{id}", ctx -> json(ctx, 200, firms(intParam(ctx, "id")).get(0)));
@@ -291,7 +300,8 @@ public final class RestApi
     private Map<String, Object> validSymbol(final Map<String, Object> b)
     {
         final Map<String, Object> p = new LinkedHashMap<>();
-        p.put("symbolId", rangeLong("symbolId", b.get("symbolId"), 1, 0xFFFF_FFFEL));
+        final long symbolId = rangeLong("symbolId", b.get("symbolId"), 1, 0xFFFF_FFFEL);
+        p.put("symbolId", symbolId);
         final Object ticker = b.get("ticker");
         if (ticker == null || !TICKER.matcher(ticker.toString()).matches())
         {
@@ -316,7 +326,35 @@ public final class RestApi
         p.put("referencePrice", ref);
         p.put("priceBandBps", rangeLong("priceBandBps", b.get("priceBandBps"), 1, 10_000));
         p.put("maxOrderQty", maxQty);
+        // dynamic collar: an absent field keeps the existing row's value (or the CSV default for a new symbol)
+        final int id = (int)symbolId;
+        final Store.SymbolRow existing = (b.get("dynamicBandBps") == null || b.get("volatilityAuctionNs") == null)
+            ? db.read(c -> Store.symbol(c, id)) : null;
+        final long dyn = b.get("dynamicBandBps") != null ? rangeLong("dynamicBandBps", b.get("dynamicBandBps"), 0, 10_000)
+            : existing != null ? existing.dynamicBandBps() : SymbolDirectory.DEFAULT_DYNAMIC_BAND_BPS;
+        final long vol = b.get("volatilityAuctionNs") != null
+            ? rangeLong("volatilityAuctionNs", b.get("volatilityAuctionNs"), 0, MAX_VOLATILITY_AUCTION_NS)
+            : existing != null ? existing.volatilityAuctionNs() : SymbolDirectory.DEFAULT_VOLATILITY_AUCTION_NS;
+        if (dyn > 0 && vol == 0)
+        {
+            throw new ApiException(400, "dynamicBandBps > 0 needs volatilityAuctionNs > 0");
+        }
+        p.put("dynamicBandBps", dyn);
+        p.put("volatilityAuctionNs", vol);
         return p;
+    }
+
+    /** PUT /api/symbols/{id}: the body may omit symbolId; when present it must equal the path id. */
+    private Map<String, Object> validSymbolPut(final int pathId, final Map<String, Object> b)
+    {
+        final Object bodyId = b.get("symbolId");
+        if (bodyId != null && rangeLong("symbolId", bodyId, 1, 0xFFFF_FFFEL) != pathId)
+        {
+            throw new ApiException(400, "symbolId in the body must match the path");
+        }
+        final Map<String, Object> withId = new LinkedHashMap<>(b);
+        withId.put("symbolId", pathId);
+        return validSymbol(withId);
     }
 
     private static Map<String, Object> validLimits(final int firmId, final Map<String, Object> b)
@@ -457,11 +495,31 @@ public final class RestApi
                 m.put("referencePrice", r.referencePrice());
                 m.put("priceBandBps", r.priceBandBps());
                 m.put("maxOrderQty", r.maxOrderQty());
+                m.put("dynamicBandBps", r.dynamicBandBps());
+                m.put("volatilityAuctionNs", r.volatilityAuctionNs());
                 m.put("status", r.status());
                 m.put("operatorState", r.operatorState());
                 final Store.ObservedSymbolRow o = observed.get(r.symbolId());
                 m.put("shardState", o == null ? null : o.state());
                 m.put("definedOnShard", o != null && o.shardId() == r.shardId());
+                m.put("inVolatilityAuction", o != null && o.volatilityAuction());
+                m.put("volatilityAuctionSinceNs", o != null && o.volatilityAuction() ? o.volatilityAuctionSinceNs() : null);
+                m.put("venueReferencePrice", o != null && o.venueReference() ? price(o.referencePrice()) : null);
+                m.put("bandLow", o == null ? null : price(o.bandLow()));
+                m.put("bandHigh", o == null ? null : price(o.bandHigh()));
+                if (o == null || o.closeSource() == null)
+                {
+                    m.put("lastClose", null);
+                }
+                else
+                {
+                    final Map<String, Object> close = new LinkedHashMap<>();
+                    close.put("price", price(o.closePrice()));
+                    close.put("previousClose", price(o.previousClose()));
+                    close.put("source", o.closeSource());
+                    close.put("tradingDate", o.closeTradingDate());
+                    m.put("lastClose", close);
+                }
                 out.add(m);
             }
             if (only != null && out.isEmpty())
@@ -470,6 +528,12 @@ public final class RestApi
             }
             return out;
         });
+    }
+
+    /** SBE null price (Long.MIN_VALUE) as JSON null. */
+    private static Long price(final long p)
+    {
+        return p == Long.MIN_VALUE ? null : p;
     }
 
     private List<Map<String, Object>> firms(final Integer only)

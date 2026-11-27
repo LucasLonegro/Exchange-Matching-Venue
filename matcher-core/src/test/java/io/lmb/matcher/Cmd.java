@@ -137,6 +137,16 @@ final class Cmd
         return bytes(b, SymbolDefinitionEncoder.BLOCK_LENGTH);
     }
 
+    /** band-stp: a SymbolDefinition with the dynamic collar and the volatility auction length. */
+    static byte[] symbol(
+        final long corr, final int symbol, final String ticker, final long tick, final long lot, final long ref,
+        final long maxQty, final long bps, final SymbolState initial, final long dynBps, final long volNs)
+    {
+        final byte[] c = symbol(corr, symbol, ticker, tick, lot, ref, maxQty, bps, initial);
+        new SymbolDefinitionEncoder().wrap(new UnsafeBuffer(c), HDR).dynamicBandBps(dynBps).volatilityAuctionNs(volNs);
+        return c;
+    }
+
     static byte[] state(final long corr, final long symbol, final SymbolState target, final long effectiveTimeNs)
     {
         final UnsafeBuffer b = buf();

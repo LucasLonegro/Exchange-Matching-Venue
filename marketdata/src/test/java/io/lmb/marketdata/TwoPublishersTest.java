@@ -52,6 +52,10 @@ class TwoPublishersTest
         for (int i = 0; i < 30; i++)
         {
             CheckpointRestartTest.activity(v, 40 + i * 7L, 1);
+            if (i == 20) // day-cycle / band-stp: cause, ReferencePrice and ClosingPrice must match too
+            {
+                v.volatilityThenRollovers(0, DayCycleMdTest.VOL, DayCycleMdTest.DAY1);
+            }
             for (int k = 0; k < 5; k++)
             {
                 a.doWork(i);
@@ -77,6 +81,13 @@ class TwoPublishersTest
             }
         }
         assertTrue(n > 500, "messages compared: " + n);
+        final java.util.Set<Integer> templates = new java.util.HashSet<>();
+        for (final byte[] m : ma.get(DayCycleMdTest.VOL))
+        {
+            templates.add(MdWire.templateId(new UnsafeBuffer(m), 0));
+        }
+        assertTrue(templates.contains(io.lmb.marketdata.sbe.ReferencePriceDecoder.TEMPLATE_ID)
+            && templates.contains(io.lmb.marketdata.sbe.ClosingPriceDecoder.TEMPLATE_ID), "new messages compared");
 
         final SnapshotWriter w = new SnapshotWriter();
         final ExpandableArrayBuffer sa = new ExpandableArrayBuffer();
@@ -176,6 +187,10 @@ class TwoPublishersTest
         for (int i = 0; i < 30; i++)
         {
             CheckpointRestartTest.activity(v, 3_000 + i, 1);
+            if (i == 20)
+            {
+                v.volatilityThenRollovers(0, DayCycleMdTest.VOL, DayCycleMdTest.DAY1);
+            }
             for (int k = 0; k < 3; k++)
             {
                 ca.poll();

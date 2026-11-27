@@ -55,6 +55,10 @@ final class ReferenceMatcher
         final List<O> book = new ArrayList<>();
         long aPx = NULL, aV, aImb;
         int aSide;
+        // day-cycle
+        long lastTradePx = NULL, closePx = NULL, prevClose = NULL;
+        boolean tradedToday, hasClose;
+        String closeSrc = "NONE";
     }
 
     static final class F
@@ -77,6 +81,8 @@ final class ReferenceMatcher
     final List<Pending> pending = new ArrayList<>();
     long orderSeq, matchSeq, timerSeq, timeSeq;
     int tradingDate;
+    /** Cluster timestamp of the entry being applied (set by the caller). */
+    long now;
     List<String> out;
 
     ReferenceMatcher(final int shard)
@@ -314,6 +320,9 @@ final class ReferenceMatcher
         }
     }
 
+    /** band-stp: the last match() stopped at a resting order of the aggressor's own firm. */
+    boolean selfTradeStop;
+
     void match(final O o, final long gwTs)
     {
         while (o.leaves() > 0)
@@ -321,6 +330,11 @@ final class ReferenceMatcher
             final O m = bestOpposite(o.sym, o.side);
             if (m == null || (o.side == 1 ? m.price > o.riskPrice : m.price < o.riskPrice))
             {
+                return;
+            }
+            if (m.firm == o.firm)
+            {
+                selfTradeStop = true;
                 return;
             }
             final long q = Math.min(o.leaves(), m.leaves());
@@ -331,6 +345,7 @@ final class ReferenceMatcher
             final O sell = o.side == 1 ? m : o;
             out.add("TRADE m=" + mid + " px=" + m.price + " q=" + q + " b=" + buy.orderId + " s=" + sell.orderId + " sym=" +
                 o.sym.id + " bf=" + buy.firm + " sf=" + sell.firm + " agg=" + o.side + " auct=FALSE");
+            traded(o.sym, m.price);
             fillEr(o, mid, q, m.price, gwTs, "TAKER");
             fillEr(m, mid, q, m.price, 0, "MAKER");
             if (m.leaves() == 0)
@@ -349,9 +364,16 @@ final class ReferenceMatcher
 
     void finish(final O o, final long gwTs)
     {
+        final boolean stp = selfTradeStop;
+        selfTradeStop = false;
         if (o.leaves() == 0)
         {
             done(o, "FILLED");
+        }
+        else if (stp)
+        {
+            er(o, o.session, o.clOrdId, 0, 0, 0, NULL, 0, gwTs, "CANCELED", "CANCELED", "NONE", "NONE", "SELF_TRADE");
+            done(o, "CANCELED");
         }
         else if (o.type == 1 && o.tif == 1)
         {
@@ -872,11 +894,21 @@ final class ReferenceMatcher
             s.id = (int)d.symbolId();
             symbols.put(s.id, s);
         }
+        final long oldRef = fresh ? NULL : s.ref;
+        final long oldBps = fresh ? -1 : s.bps;
+        final long oldLow = fresh ? NULL : s.bandLow;
+        final long oldHigh = fresh ? NULL : s.bandHigh;
         if (fresh)
         {
             s.state = init;
             s.ref = ref;
             s.lastTs = Long.MIN_VALUE;
+            s.lastTradePx = NULL;
+            s.closePx = NULL;
+            s.prevClose = NULL;
+            s.tradedToday = false;
+            s.hasClose = false;
+            s.closeSrc = "NONE";
             s.aPx = NULL;
             s.aV = 0;
             s.aImb = 0;
@@ -894,6 +926,12 @@ final class ReferenceMatcher
         band(s);
         out.add("SYMDEF corr=" + corr + " sym=" + s.id + " tick=" + s.tick + " lot=" + s.lot + " ref=" + s.ref + " max=" +
             s.maxQty + " bps=" + s.bps + " ticker=" + s.ticker + " state=" + STATES[s.state]);
+        // a definition that sets or moves the band publishes it
+        if (s.ref != NULL && (s.ref != oldRef || s.bps != oldBps || s.bandLow != oldLow || s.bandHigh != oldHigh))
+        {
+            out.add("REF sym=" + s.id + " ref=" + s.ref + " bid=" + NULL + " ofr=" + NULL + " band=" + s.bandLow +
+                ".." + s.bandHigh + " ts=" + s.lastTs);
+        }
         if (s.state == 2)
         {
             indicative(s);
@@ -971,12 +1009,14 @@ final class ReferenceMatcher
     void transition(final S s, final int target, final long corr, final int reason)
     {
         final int prev = s.state;
+        final long matchBefore = matchSeq;
         if ((prev == 2 && (target == 3 || target == 5)) || (target == 3 && crossed(s)))
         {
             uncross(s);
         }
         s.state = target;
-        out.add("STATE corr=" + corr + " sym=" + s.id + " rc=" + reason + " " + STATES[prev] + "->" + STATES[target]);
+        out.add("STATE corr=" + corr + " sym=" + s.id + " rc=" + reason + " " + STATES[prev] + "->" + STATES[target] +
+            " cause=COMMAND");
         if (target == 5 || target == 6)
         {
             final TreeMap<String, long[]> before = levels();
@@ -993,6 +1033,10 @@ final class ReferenceMatcher
             s.aV = 0;
             s.aImb = 0;
             s.aSide = 0;
+            if (target == 5)
+            {
+                close(s, prev == 2 && matchSeq != matchBefore, tradingDate);
+            }
         }
         else if (target == 2)
         {
@@ -1085,6 +1129,7 @@ final class ReferenceMatcher
                 fill(x, q, a[0]);
                 out.add("TRADE m=" + mid + " px=" + a[0] + " q=" + q + " b=" + b.orderId + " s=" + x.orderId + " sym=" + s.id +
                     " bf=" + b.firm + " sf=" + x.firm + " agg=255 auct=TRUE");
+                traded(s, a[0]);
                 fillEr(b, mid, q, a[0], 0, "AUCTION");
                 fillEr(x, mid, q, a[0], 0, "AUCTION");
                 if (b.leaves() == 0)
@@ -1143,6 +1188,7 @@ final class ReferenceMatcher
             out.add("CMDREJ corr=" + d.correlationId() + " t=14 r=INVALID_STATE_TRANSITION");
             return;
         }
+        final int closingDate = tradingDate;
         tradingDate = d.tradingDate();
         final TreeMap<String, long[]> before = levels();
         int n = 0;
@@ -1154,20 +1200,65 @@ final class ReferenceMatcher
         diff(before, false);
         dedupe.clear();
         firms.values().forEach(f -> f.tradedNet = 0);
-        positions.clear();
+        // positions carry over
         for (final S s : symbols.values())
         {
-            if (s.state != 6 && s.state != 1)
+            if (s.state == 6)
             {
-                out.add("STATE corr=" + d.correlationId() + " sym=" + s.id + " rc=0 " + STATES[s.state] + "->PRE_OPEN");
+                continue;
+            }
+            if (!s.hasClose)
+            {
+                close(s, false, closingDate);
+            }
+            if (s.state != 1)
+            {
+                out.add("STATE corr=" + d.correlationId() + " sym=" + s.id + " rc=0 " + STATES[s.state] + "->PRE_OPEN" +
+                    " cause=DAY_ROLLOVER");
                 s.state = 1;
                 s.aPx = NULL;
                 s.aV = 0;
                 s.aImb = 0;
                 s.aSide = 0;
             }
+            if (s.closePx != NULL)
+            {
+                s.ref = s.closePx;
+                s.lastTs = Math.max(s.lastTs, now);
+                band(s);
+                out.add("REF sym=" + s.id + " ref=" + s.ref + " bid=" + NULL + " ofr=" + NULL + " band=" + s.bandLow +
+                    ".." + s.bandHigh + " ts=" + s.lastTs);
+            }
+            s.prevClose = s.closePx;
+            s.closePx = NULL;
+            s.closeSrc = "NONE";
+            s.hasClose = false;
+            s.tradedToday = false;
         }
         out.add("DAYROLLED corr=" + d.correlationId() + " date=" + d.tradingDate() + " n=" + n);
+    }
+
+    void traded(final S s, final long px)
+    {
+        s.lastTradePx = px;
+        s.tradedToday = true;
+        s.hasClose = false;
+    }
+
+    void close(final S s, final boolean auction, final int date)
+    {
+        if (auction)
+        {
+            s.closePx = s.lastTradePx;
+            s.closeSrc = "AUCTION";
+        }
+        else if (!s.hasClose)
+        {
+            s.closePx = s.tradedToday ? s.lastTradePx : s.prevClose;
+            s.closeSrc = s.tradedToday ? "LAST_TRADE" : s.prevClose != NULL ? "PREVIOUS_CLOSE" : "NONE";
+        }
+        s.hasClose = true;
+        out.add("CLOSE sym=" + s.id + " px=" + s.closePx + " prev=" + s.prevClose + " date=" + date + " src=" + s.closeSrc);
     }
 
     static String stateName(final SymbolState s)

@@ -89,7 +89,8 @@ public final class TestVenue implements VenueClients
     {
         final SymbolDefinitionEncoder e = new SymbolDefinitionEncoder().wrapAndApplyHeader(buf, 0, hdr);
         e.correlationId(nextCorrelationId++).tickSize(1).lotSize(1).referencePrice(refPrice).maxOrderQty(1_000_000)
-            .symbolId(symbolId).priceBandBps(5000).ticker(ticker).initialState(SymbolState.CONTINUOUS);
+            .symbolId(symbolId).priceBandBps(5000).dynamicBandBps(0).volatilityAuctionNs(0).ticker(ticker)
+            .initialState(SymbolState.CONTINUOUS);
         send(shard, MessageHeaderEncoder.ENCODED_LENGTH + e.encodedLength());
     }
 

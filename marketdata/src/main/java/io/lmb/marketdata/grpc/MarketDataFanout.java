@@ -4,6 +4,10 @@ import io.grpc.Status;
 import io.lmb.marketdata.PublisherMetrics;
 import io.lmb.marketdata.book.OrderBook;
 import io.lmb.marketdata.sbe.AuctionIndicativeDecoder;
+import io.lmb.marketdata.sbe.CloseSource;
+import io.lmb.marketdata.sbe.ClosingPriceDecoder;
+import io.lmb.marketdata.sbe.ReferencePriceDecoder;
+import io.lmb.marketdata.sbe.StateCause;
 import io.lmb.marketdata.sbe.BookSide;
 import io.lmb.marketdata.sbe.InstrumentDefinitionDecoder;
 import io.lmb.marketdata.sbe.LevelUpdateDecoder;
@@ -15,6 +19,8 @@ import io.lmb.marketdata.sbe.TradingState;
 import io.lmb.marketdata.wire.MdWire;
 import io.lmb.proto.marketdata.AuctionIndicative;
 import io.lmb.proto.marketdata.MarketDataUpdate;
+import io.lmb.proto.marketdata.ClosingPrice;
+import io.lmb.proto.marketdata.ReferencePrice;
 import io.lmb.proto.marketdata.SymbolStatus;
 import io.lmb.proto.marketdata.TradePrint;
 import org.agrona.DirectBuffer;
@@ -59,6 +65,17 @@ public final class MarketDataFanout implements AutoCloseable
         int state = 1;
         long seq;
         long transactTimeNs;
+        // day-cycle / band-stp
+        short stateCause = 255;
+        long referencePrice = Long.MIN_VALUE;
+        long bandLow = Long.MIN_VALUE;
+        long bandHigh = Long.MIN_VALUE;
+        long priceBandBps = -1;
+        long closePrice = Long.MIN_VALUE;
+        long previousClose = Long.MIN_VALUE;
+        int closeTradingDate;
+        short closeSource;
+        boolean hasClose;
 
         FanoutSymbol(final int symbolId)
         {
@@ -69,6 +86,41 @@ public final class MarketDataFanout implements AutoCloseable
         {
             final TradingState s = TradingState.get((short)state);
             return s == TradingState.NULL_VAL ? "" : s.name();
+        }
+
+        String stateCauseName()
+        {
+            final StateCause c = MdWire.stateCause(stateCause);
+            return c == StateCause.NULL_VAL ? "" : c.name();
+        }
+
+        /** Null when no reference price is known. */
+        ReferencePrice reference()
+        {
+            if (referencePrice == Long.MIN_VALUE && bandLow == Long.MIN_VALUE)
+            {
+                return null;
+            }
+            final boolean hasRef = referencePrice != Long.MIN_VALUE;
+            final boolean hasBand = bandLow != Long.MIN_VALUE && bandHigh != Long.MIN_VALUE;
+            return ReferencePrice.newBuilder().setReferencePriceCents(hasRef ? referencePrice : 0)
+                .setHasReferencePrice(hasRef).setBandLowCents(hasBand ? bandLow : 0)
+                .setBandHighCents(hasBand ? bandHigh : 0).setHasBand(hasBand).build();
+        }
+
+        /** Null when no ClosingPrice was published. */
+        ClosingPrice close()
+        {
+            if (!hasClose)
+            {
+                return null;
+            }
+            final CloseSource src = MdWire.closeSource(closeSource);
+            return ClosingPrice.newBuilder().setPriceCents(closePrice == Long.MIN_VALUE ? 0 : closePrice)
+                .setHasPrice(closePrice != Long.MIN_VALUE)
+                .setPreviousCloseCents(previousClose == Long.MIN_VALUE ? 0 : previousClose)
+                .setHasPreviousClose(previousClose != Long.MIN_VALUE).setTradingDate(closeTradingDate)
+                .setSource(src == CloseSource.NULL_VAL ? "" : src.name()).build();
         }
 
         MarketDataUpdate.Builder update()
@@ -96,6 +148,8 @@ public final class MarketDataFanout implements AutoCloseable
     private final InstrumentDefinitionDecoder instrument = new InstrumentDefinitionDecoder();
     private final SnapshotBeginDecoder snapshotBegin = new SnapshotBeginDecoder();
     private final SnapshotLevelsDecoder snapshotLevels = new SnapshotLevelsDecoder();
+    private final ReferencePriceDecoder referencePrice = new ReferencePriceDecoder();
+    private final ClosingPriceDecoder closingPrice = new ClosingPriceDecoder();
     private final byte[] tickerBytes = new byte[8];
 
     private boolean midBatch;
@@ -357,8 +411,29 @@ public final class MarketDataFanout implements AutoCloseable
                 symbolStatus.wrap(b, body, blockLength, version);
                 fs.seq = seq;
                 fs.state = symbolStatus.stateRaw();
+                fs.stateCause = symbolStatus.causeRaw();
                 update = fs.update().setStatus(SymbolStatus.newBuilder().setState(fs.stateName())
-                    .setReasonCode(symbolStatus.reasonCode())).build();
+                    .setReasonCode(symbolStatus.reasonCode()).setCause(fs.stateCauseName())).build();
+            }
+            case ReferencePriceDecoder.TEMPLATE_ID ->
+            {
+                referencePrice.wrap(b, body, blockLength, version);
+                fs.seq = seq;
+                fs.referencePrice = referencePrice.referencePrice();
+                fs.bandLow = referencePrice.bandLow();
+                fs.bandHigh = referencePrice.bandHigh();
+                update = fs.update().setReference(fs.reference()).build();
+            }
+            case ClosingPriceDecoder.TEMPLATE_ID ->
+            {
+                closingPrice.wrap(b, body, blockLength, version);
+                fs.seq = seq;
+                fs.closePrice = closingPrice.price();
+                fs.previousClose = closingPrice.previousClose();
+                fs.closeTradingDate = closingPrice.tradingDate();
+                fs.closeSource = closingPrice.sourceRaw();
+                fs.hasClose = true;
+                update = fs.update().setClose(fs.close()).build();
             }
             case AuctionIndicativeDecoder.TEMPLATE_ID ->
             {
@@ -377,6 +452,15 @@ public final class MarketDataFanout implements AutoCloseable
                 instrument.getTicker(tickerBytes, 0);
                 fs.ticker = MdWire.ticker(tickerBytes);
                 fs.state = instrument.stateRaw();
+                final long ref = instrument.referencePrice();
+                final long bps = instrument.priceBandBps();
+                if (ref != fs.referencePrice || bps != fs.priceBandBps)
+                {
+                    fs.bandLow = Long.MIN_VALUE; // as the publisher does (see SnapshotBegin.bandLow)
+                    fs.bandHigh = Long.MIN_VALUE;
+                }
+                fs.referencePrice = ref;
+                fs.priceBandBps = bps;
                 fs.seq = seq;
                 for (int i = 0; i < subscribers.size(); i++)
                 {
@@ -438,6 +522,16 @@ public final class MarketDataFanout implements AutoCloseable
                 fs.seq = snapshotBegin.lastSeq();
                 fs.transactTimeNs = snapshotBegin.transactTimeNs();
                 fs.state = snapshotBegin.stateRaw();
+                fs.stateCause = snapshotBegin.stateCauseRaw();
+                fs.referencePrice = snapshotBegin.referencePrice();
+                fs.bandLow = snapshotBegin.bandLow();
+                fs.bandHigh = snapshotBegin.bandHigh();
+                fs.priceBandBps = snapshotBegin.priceBandBps();
+                fs.closePrice = snapshotBegin.closePrice();
+                fs.previousClose = snapshotBegin.previousClose();
+                fs.closeTradingDate = snapshotBegin.closeTradingDate();
+                fs.closeSource = snapshotBegin.closeSourceRaw();
+                fs.hasClose = fs.closeSource != 255; // CloseSource null: no ClosingPrice yet
                 snapshotBegin.getTicker(tickerBytes, 0);
                 fs.ticker = MdWire.ticker(tickerBytes);
             }

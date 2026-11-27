@@ -4,9 +4,13 @@ import io.lmb.common.Events;
 import io.lmb.marketdata.book.OrderBook;
 import io.lmb.marketdata.sbe.AuctionIndicativeEncoder;
 import io.lmb.marketdata.sbe.BookSide;
+import io.lmb.marketdata.sbe.ClosingPriceEncoder;
+import io.lmb.marketdata.sbe.CloseSource;
 import io.lmb.marketdata.sbe.InstrumentDefinitionEncoder;
 import io.lmb.marketdata.sbe.LevelUpdateEncoder;
 import io.lmb.marketdata.sbe.MessageHeaderEncoder;
+import io.lmb.marketdata.sbe.ReferencePriceEncoder;
+import io.lmb.marketdata.sbe.StateCause;
 import io.lmb.marketdata.sbe.SeqHeaderEncoder;
 import io.lmb.marketdata.sbe.SymbolStatusEncoder;
 import io.lmb.marketdata.sbe.TradePrintEncoder;
@@ -15,8 +19,10 @@ import io.lmb.marketdata.sbe.YesNo;
 import io.lmb.marketdata.wire.MdWire;
 import io.lmb.sbe.AuctionUpdateDecoder;
 import io.lmb.sbe.BookDeltaDecoder;
+import io.lmb.sbe.ClosingPriceDecoder;
 import io.lmb.sbe.CommandAppliedDecoder;
 import io.lmb.sbe.DayRolledDecoder;
+import io.lmb.sbe.ReferencePriceAppliedDecoder;
 import io.lmb.sbe.SymbolDefinedDecoder;
 import io.lmb.sbe.SymbolStateChangedDecoder;
 import io.lmb.sbe.TradeDecoder;
@@ -42,7 +48,7 @@ import java.util.ArrayList;
  *       is emitted in whole batches.</li>
  *   <li>Each symbol has a sequence counter starting at 1; every message for the symbol takes the
  *       next value. One message per relevant event: BookDelta, Trade, SymbolStateChanged,
- *       AuctionUpdate, SymbolDefined. DayRolled additionally removes any level still resting for
+ *       AuctionUpdate, SymbolDefined, ReferencePriceApplied, ClosingPrice. DayRolled additionally removes any level still resting for
  *       the shard's symbols (a no-op when the matcher already emitted the deltas).</li>
  *   <li>The last message of each symbol in a batch carries {@link MdWire#FLAG_END_OF_BATCH}.</li>
  *   <li>Events at or below the last seen eventSeq of the shard are dropped (at-least-once delivery).</li>
@@ -80,6 +86,8 @@ public final class BookBuilder
     private final SymbolStateChangedDecoder stateChanged = new SymbolStateChangedDecoder();
     private final AuctionUpdateDecoder auctionUpdate = new AuctionUpdateDecoder();
     private final SymbolDefinedDecoder symbolDefined = new SymbolDefinedDecoder();
+    private final ReferencePriceAppliedDecoder referenceApplied = new ReferencePriceAppliedDecoder();
+    private final ClosingPriceDecoder closingPrice = new ClosingPriceDecoder();
 
     private final MessageHeaderEncoder header = new MessageHeaderEncoder();
     private final LevelUpdateEncoder levelUpdate = new LevelUpdateEncoder();
@@ -87,6 +95,8 @@ public final class BookBuilder
     private final SymbolStatusEncoder symbolStatus = new SymbolStatusEncoder();
     private final AuctionIndicativeEncoder auctionIndicative = new AuctionIndicativeEncoder();
     private final InstrumentDefinitionEncoder instrumentDefinition = new InstrumentDefinitionEncoder();
+    private final ReferencePriceEncoder referencePrice = new ReferencePriceEncoder();
+    private final ClosingPriceEncoder closingPriceOut = new ClosingPriceEncoder();
 
     private long duplicateEvents;
     private long eventGaps;
@@ -145,7 +155,8 @@ public final class BookBuilder
         switch (templateId)
         {
             case BookDeltaDecoder.TEMPLATE_ID, TradeDecoder.TEMPLATE_ID, SymbolStateChangedDecoder.TEMPLATE_ID,
-                AuctionUpdateDecoder.TEMPLATE_ID, SymbolDefinedDecoder.TEMPLATE_ID, DayRolledDecoder.TEMPLATE_ID ->
+                AuctionUpdateDecoder.TEMPLATE_ID, SymbolDefinedDecoder.TEMPLATE_ID, DayRolledDecoder.TEMPLATE_ID,
+                ReferencePriceAppliedDecoder.TEMPLATE_ID, ClosingPriceDecoder.TEMPLATE_ID ->
                 stage.stage(buffer, offset, length);
             case CommandAppliedDecoder.TEMPLATE_ID -> commit(stage, Events.timestampNs(buffer, offset));
             default ->
@@ -299,12 +310,14 @@ public final class BookBuilder
                 stateChanged.wrap(b, body, blockLength, version);
                 final SymbolBook s = symbolFor((int)stateChanged.symbolId(), shardId);
                 s.state = stateChanged.newStateRaw();
+                s.stateCause = stateChanged.causeRaw();
                 final int at = begin(SymbolStatusEncoder.BLOCK_LENGTH, SymbolStatusEncoder.TEMPLATE_ID);
                 symbolStatus.wrap(batch, at + MdWire.HEADER_LENGTH);
                 seqHeader(symbolStatus.seqHeader(), s, timestampNs);
                 symbolStatus.reasonCode(stateChanged.reasonCode())
                     .state(TradingState.get(stateChanged.newStateRaw()))
-                    .previousState(TradingState.get(stateChanged.previousStateRaw()));
+                    .previousState(TradingState.get(stateChanged.previousStateRaw()))
+                    .cause(MdWire.stateCause(s.stateCause));
                 end(s, at, MdWire.HEADER_LENGTH + SymbolStatusEncoder.BLOCK_LENGTH);
             }
             case AuctionUpdateDecoder.TEMPLATE_ID ->
@@ -327,7 +340,18 @@ public final class BookBuilder
                 final SymbolBook s = symbolFor((int)symbolDefined.symbolId(), shardId);
                 s.tickSize = symbolDefined.tickSize();
                 s.lotSize = symbolDefined.lotSize();
-                s.referencePrice = symbolDefined.referencePrice();
+                final long ref = symbolDefined.referencePrice();
+                final long bandBps = symbolDefined.priceBandBps();
+                if (ref != s.referencePrice || bandBps != s.priceBandBps)
+                {
+                    // The matcher recomputed the band without a ReferencePriceApplied: the last one no longer holds.
+                    s.bandLow = Long.MIN_VALUE;
+                    s.bandHigh = Long.MIN_VALUE;
+                }
+                s.referencePrice = ref;
+                s.priceBandBps = bandBps;
+                s.dynamicBandBps = symbolDefined.dynamicBandBps();
+                s.volatilityAuctionNs = symbolDefined.volatilityAuctionNs();
                 s.state = symbolDefined.stateRaw();
                 symbolDefined.getTicker(s.ticker, 0);
                 final int at = begin(InstrumentDefinitionEncoder.BLOCK_LENGTH,
@@ -335,8 +359,38 @@ public final class BookBuilder
                 instrumentDefinition.wrap(batch, at + MdWire.HEADER_LENGTH);
                 seqHeader(instrumentDefinition.seqHeader(), s, timestampNs);
                 instrumentDefinition.tickSize(s.tickSize).lotSize(s.lotSize).referencePrice(s.referencePrice)
-                    .putTicker(s.ticker, 0).state(TradingState.get((short)s.state));
+                    .putTicker(s.ticker, 0).state(TradingState.get((short)s.state))
+                    .priceBandBps(s.priceBandBps).dynamicBandBps(s.dynamicBandBps)
+                    .volatilityAuctionNs(s.volatilityAuctionNs);
                 end(s, at, MdWire.HEADER_LENGTH + InstrumentDefinitionEncoder.BLOCK_LENGTH);
+            }
+            case ReferencePriceAppliedDecoder.TEMPLATE_ID ->
+            {
+                referenceApplied.wrap(b, body, blockLength, version);
+                final SymbolBook s = symbolFor((int)referenceApplied.symbolId(), shardId);
+                s.referencePrice = referenceApplied.referencePrice();
+                s.bandLow = referenceApplied.bandLow();
+                s.bandHigh = referenceApplied.bandHigh();
+                final int at = begin(ReferencePriceEncoder.BLOCK_LENGTH, ReferencePriceEncoder.TEMPLATE_ID);
+                referencePrice.wrap(batch, at + MdWire.HEADER_LENGTH);
+                seqHeader(referencePrice.seqHeader(), s, timestampNs);
+                referencePrice.referencePrice(s.referencePrice).bandLow(s.bandLow).bandHigh(s.bandHigh);
+                end(s, at, MdWire.HEADER_LENGTH + ReferencePriceEncoder.BLOCK_LENGTH);
+            }
+            case ClosingPriceDecoder.TEMPLATE_ID ->
+            {
+                closingPrice.wrap(b, body, blockLength, version);
+                final SymbolBook s = symbolFor((int)closingPrice.symbolId(), shardId);
+                s.closePrice = closingPrice.price();
+                s.previousClose = closingPrice.previousClose();
+                s.closeTradingDate = closingPrice.tradingDate();
+                s.closeSource = closingPrice.sourceRaw();
+                final int at = begin(ClosingPriceEncoder.BLOCK_LENGTH, ClosingPriceEncoder.TEMPLATE_ID);
+                closingPriceOut.wrap(batch, at + MdWire.HEADER_LENGTH);
+                seqHeader(closingPriceOut.seqHeader(), s, timestampNs);
+                closingPriceOut.price(s.closePrice).previousClose(s.previousClose).tradingDate(s.closeTradingDate)
+                    .source(MdWire.closeSource(s.closeSource));
+                end(s, at, MdWire.HEADER_LENGTH + ClosingPriceEncoder.BLOCK_LENGTH);
             }
             case DayRolledDecoder.TEMPLATE_ID -> clearShardBooks(shardId, timestampNs);
             default ->

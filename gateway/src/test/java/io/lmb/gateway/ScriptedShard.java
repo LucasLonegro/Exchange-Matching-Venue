@@ -36,7 +36,8 @@ import java.util.Set;
 
 /**
  * A deliberately small stand-in for the real matcher: acks, rejects (price of 1 cent is rejected
- * with INVALID_PRICE), matches price-time at the resting price, cancels, replaces, mass cancels, and
+ * with INVALID_PRICE; a limit at 2 cents is acked then cancelled with SELF_TRADE), matches price-time at the
+ * resting price, cancels, replaces, mass cancels, and
  * honours the (firmId, clOrdId) dedupe rule including possResend. Records every command it applied.
  */
 final class ScriptedShard implements ShardStateMachine
@@ -186,6 +187,14 @@ final class ScriptedShard implements ShardStateMachine
         }
         o.orderId = ((long)shardId << 48) | ++nextOrder;
         emit(o, ExecType.NEW, OrdStatus.NEW, 0, 0, 0, LiquidityFlag.NONE, RejectReason.NONE, CancelReason.NONE, inTs, 0, 0);
+        if (o.ordType == OrdType.LIMIT && o.price == 2)
+        {
+            // Magic price: what the real matcher's self-trade prevention emits for a cancelled taker.
+            o.open = false;
+            emit(o, ExecType.CANCELED, OrdStatus.CANCELED, 0, 0, 0, LiquidityFlag.NONE, RejectReason.NONE,
+                CancelReason.SELF_TRADE, 0, 0, 0);
+            return;
+        }
         for (final Order r : book)
         {
             if (o.qty - o.cum == 0)

@@ -97,6 +97,9 @@
             <validValue name="SYMBOL_REMOVED">6</validValue>
             <validValue name="END_OF_DAY">7</validValue>
             <validValue name="ADMIN">8</validValue>
+            <!-- band-stp: self-trade prevention -->
+            <validValue name="SELF_TRADE" description="Incoming order's remainder canceled: it reached a resting order of the same firm">9</validValue>
+            <!-- /band-stp -->
         </enum>
         <enum name="SymbolState" encodingType="uint8">
             <validValue name="PRE_OPEN">1</validValue>
@@ -119,6 +122,23 @@
             <validValue name="TAKER">2</validValue>
             <validValue name="AUCTION">3</validValue>
         </enum>
+
+        <!-- day-cycle: official close price -->
+        <enum name="ClosePriceSource" encodingType="uint8" description="How a ClosingPrice was determined">
+            <validValue name="NONE" description="No trade today and no previous close: price is null">0</validValue>
+            <validValue name="AUCTION" description="The closing auction (uncross on AUCTION_CALL to CLOSED) traded">1</validValue>
+            <validValue name="LAST_TRADE" description="Last trade print of the trading day (auction or continuous)">2</validValue>
+            <validValue name="PREVIOUS_CLOSE" description="No trade today: the previous trading day's close is carried">3</validValue>
+        </enum>
+        <!-- end day-cycle -->
+        <!-- band-stp: why a symbol changed state -->
+        <enum name="StateChangeCause" encodingType="uint8" description="Origin of a SymbolStateChanged">
+            <validValue name="COMMAND">0</validValue>
+            <validValue name="VOLATILITY_INTERRUPTION">1</validValue>
+            <validValue name="VOLATILITY_AUCTION_END">2</validValue>
+            <validValue name="DAY_ROLLOVER">3</validValue>
+        </enum>
+        <!-- /band-stp -->
     </types>
 
     <!-- ===================== COMMANDS (templateId 1..99): inputs to the Raft log ===================== -->
@@ -195,6 +215,10 @@
         <field name="priceBandBps" id="7" type="uint32" description="Band half-width around the reference price, basis points"/>
         <field name="ticker" id="8" type="Ticker"/>
         <field name="initialState" id="9" type="SymbolState" description="Only used when the symbol is new"/>
+        <!-- band-stp: dynamic collar and volatility interruption -->
+        <field name="volatilityAuctionNs" id="10" type="int64" description="Length of a volatility auction (cluster ns); must be positive when dynamicBandBps is positive"/>
+        <field name="dynamicBandBps" id="11" type="uint32" description="Dynamic collar half-width around the last trade price, basis points; 0 = no dynamic collar"/>
+        <!-- /band-stp -->
     </sbe:message>
 
     <sbe:message name="SymbolStateCommand" id="12" description="Halts, pauses, auctions, open and close">
@@ -213,7 +237,7 @@
         <field name="enabled" id="5" type="BooleanType" description="FALSE = kill switch: new orders rejected, cancels still allowed"/>
     </sbe:message>
 
-    <sbe:message name="DayRollover" id="14" description="Expires all orders, clears the clOrdId dedupe table and intraday risk usage">
+    <sbe:message name="DayRollover" id="14" description="Expires all orders, clears the clOrdId dedupe table and intraday risk usage (positions carry over); closes the trading day and sets each reference price to its close">
         <field name="correlationId" id="1" type="int64"/>
         <field name="tradingDate" id="2" type="int32" description="yyyymmdd of the day that starts"/>
     </sbe:message>
@@ -278,6 +302,9 @@
         <field name="reasonCode" id="4" type="uint16"/>
         <field name="previousState" id="5" type="SymbolState"/>
         <field name="newState" id="6" type="SymbolState"/>
+        <!-- band-stp: distinguishes matcher-initiated volatility auctions -->
+        <field name="cause" id="7" type="StateChangeCause" description="COMMAND (SymbolStateCommand, immediate or at its effectiveTimeNs), VOLATILITY_INTERRUPTION / VOLATILITY_AUCTION_END (matcher), DAY_ROLLOVER"/>
+        <!-- /band-stp -->
     </sbe:message>
 
     <sbe:message name="AuctionUpdate" id="105" description="Indicative uncross during AUCTION_CALL (emitted when it changes) and the final result at uncross">
@@ -332,6 +359,10 @@
         <field name="priceBandBps" id="8" type="uint32"/>
         <field name="ticker" id="9" type="Ticker"/>
         <field name="state" id="10" type="SymbolState"/>
+        <!-- band-stp: echo of the SymbolDefinition parameters -->
+        <field name="volatilityAuctionNs" id="11" type="int64"/>
+        <field name="dynamicBandBps" id="12" type="uint32"/>
+        <!-- /band-stp -->
     </sbe:message>
 
     <sbe:message name="CommandRejected" id="110" description="A control command (templateId >= 10) or a malformed message was refused">
@@ -354,4 +385,15 @@
         <field name="commandTemplateId" id="3" type="uint16" description="0 for a timer"/>
         <field name="chainHash" id="4" type="Hash256"/>
     </sbe:message>
+
+    <!-- day-cycle: official close price -->
+    <sbe:message name="ClosingPrice" id="112" description="Official close of a symbol for a trading day. Emitted when the symbol enters CLOSED and, at DayRollover, for a symbol whose close is not current (it never closed that day, or traded after closing). The last ClosingPrice of a symbol before DayRolled is the official close and becomes the next day's reference price">
+        <field name="eventHeader" id="1" type="EventHeader"/>
+        <field name="price" id="2" type="Price" description="Close price; null when source is NONE"/>
+        <field name="previousClose" id="3" type="Price" description="Official close of the previous trading day, null if none"/>
+        <field name="symbolId" id="4" type="uint32"/>
+        <field name="tradingDate" id="5" type="int32" description="yyyymmdd of the trading day being closed (the last applied DayRollover; 0 before the first roll)"/>
+        <field name="source" id="6" type="ClosePriceSource"/>
+    </sbe:message>
+    <!-- end day-cycle -->
 </sbe:messageSchema>
