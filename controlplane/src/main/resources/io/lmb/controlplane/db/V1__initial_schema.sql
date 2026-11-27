@@ -1,4 +1,4 @@
--- LMB control plane schema, version 1. Portable subset of PostgreSQL and H2. Idempotent (IF NOT EXISTS).
+-- LMB control plane schema. Portable subset of PostgreSQL and H2. Idempotent (IF NOT EXISTS).
 -- Times are epoch milliseconds (BIGINT) unless the column ends in _ns. Money is integer cents.
 
 -- Set once, by whichever instance bootstrapped the database from the CSV files.
@@ -20,7 +20,11 @@ CREATE TABLE IF NOT EXISTS symbol (
   max_order_qty BIGINT NOT NULL,
   status VARCHAR(16) NOT NULL,
   operator_state VARCHAR(16),
-  updated_ms BIGINT NOT NULL);
+  updated_ms BIGINT NOT NULL,
+  -- dynamic collar half-width around the last trade (0 = off) and volatility auction length;
+  -- defaults match io.lmb.common.SymbolDirectory (collar off, 5 minutes)
+  dynamic_band_bps INTEGER DEFAULT 0 NOT NULL,
+  volatility_auction_ns BIGINT DEFAULT 300000000000 NOT NULL);
 
 -- Participants.
 CREATE TABLE IF NOT EXISTS firm (
@@ -95,6 +99,25 @@ CREATE TABLE IF NOT EXISTS shard_symbol_state (
   state VARCHAR(16) NOT NULL,
   last_correlation_id BIGINT NOT NULL,
   event_seq BIGINT NOT NULL,
+  -- the collar parameters as echoed by SymbolDefined
+  dynamic_band_bps INTEGER DEFAULT 0 NOT NULL,
+  volatility_auction_ns BIGINT DEFAULT 0 NOT NULL,
+  -- TRUE while the symbol is in a matcher-initiated volatility auction (SymbolStateChanged cause
+  -- VOLATILITY_INTERRUPTION, cleared by any later state change); since_ns = cluster time it started
+  volatility_auction BOOLEAN DEFAULT FALSE NOT NULL,
+  volatility_auction_since_ns BIGINT DEFAULT 0 NOT NULL,
+  -- TRUE once the venue owns the reference price (a ReferencePriceApplied seen since the symbol was defined,
+  -- or a SymbolDefined echo that kept its own reference over the one sent). From then on reference_price is
+  -- the venue's, and the listing price in symbol.reference_price is neither compared nor pushed.
+  venue_reference BOOLEAN DEFAULT FALSE NOT NULL,
+  -- static band of the last ReferencePriceApplied (NULL until one is seen)
+  band_low BIGINT,
+  band_high BIGINT,
+  -- last ClosingPrice; close_source NONE | AUCTION | LAST_TRADE | PREVIOUS_CLOSE, NULL = none seen yet
+  close_price BIGINT,
+  previous_close BIGINT,
+  close_source VARCHAR(16),
+  close_trading_date INTEGER,
   PRIMARY KEY (shard_id, symbol_id));
 
 -- Last RiskLimitApplied per firm and shard.

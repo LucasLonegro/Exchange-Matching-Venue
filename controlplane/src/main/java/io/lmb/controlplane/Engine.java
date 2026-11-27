@@ -8,14 +8,17 @@ import io.lmb.controlplane.TrackedCommand.Status;
 import io.lmb.controlplane.db.Database;
 import io.lmb.controlplane.db.Store;
 import io.lmb.sbe.BooleanType;
+import io.lmb.sbe.ClosingPriceDecoder;
 import io.lmb.sbe.CommandRejectedDecoder;
 import io.lmb.sbe.DayRolledDecoder;
 import io.lmb.sbe.DayRolloverDecoder;
 import io.lmb.sbe.MassCancelDoneDecoder;
 import io.lmb.sbe.MessageHeaderDecoder;
+import io.lmb.sbe.ReferencePriceAppliedDecoder;
 import io.lmb.sbe.RejectReason;
 import io.lmb.sbe.RiskLimitAppliedDecoder;
 import io.lmb.sbe.RiskLimitUpdateDecoder;
+import io.lmb.sbe.StateChangeCause;
 import io.lmb.sbe.SymbolDefinedDecoder;
 import io.lmb.sbe.SymbolDefinitionDecoder;
 import io.lmb.sbe.SymbolState;
@@ -107,6 +110,10 @@ public final class Engine
     private final CommandRejectedDecoder rejected = new CommandRejectedDecoder();
     private final DayRolledDecoder dayRolled = new DayRolledDecoder();
     private final MassCancelDoneDecoder massCancelDone = new MassCancelDoneDecoder();
+    private final ReferencePriceAppliedDecoder refApplied = new ReferencePriceAppliedDecoder();
+    private final ClosingPriceDecoder closingPrice = new ClosingPriceDecoder();
+    private final SymbolDefinitionDecoder sentDefinition = new SymbolDefinitionDecoder();
+    private final MessageHeaderDecoder sentHeader = new MessageHeaderDecoder();
     private final UnsafeBuffer offerBuffer = new UnsafeBuffer(new byte[0]);
 
     public Engine(final ControlPlaneConfig cfg, final Database db, final VenueClients venue, final Clock clock,
@@ -329,6 +336,17 @@ public final class Engine
                     s.state = SymbolState.valueOf(r.state());
                     s.lastCorrelationId = r.lastCorrelationId();
                     s.eventSeq = r.eventSeq();
+                    s.dynamicBandBps = r.dynamicBandBps();
+                    s.volatilityAuctionNs = r.volatilityAuctionNs();
+                    s.volatilityAuction = r.volatilityAuction();
+                    s.volatilityAuctionSinceNs = r.volatilityAuctionSinceNs();
+                    s.venueReference = r.venueReference();
+                    s.bandLow = r.bandLow();
+                    s.bandHigh = r.bandHigh();
+                    s.closePrice = r.closePrice();
+                    s.previousClose = r.previousClose();
+                    s.closeSource = r.closeSource();
+                    s.closeTradingDate = r.closeTradingDate();
                     shards[r.shardId()].symbols.put(s.symbolId, s);
                 }
             }
@@ -497,7 +515,11 @@ public final class Engine
             {
                 symbolDefined.wrapAndApplyHeader(buffer, offset, header);
                 final int id = (int)symbolDefined.symbolId();
-                final ShardState.Symbol s = sh.symbols.computeIfAbsent(id, k -> new ShardState.Symbol());
+                final ShardState.Symbol known = sh.symbols.get(id);
+                // A new symbol, or one re-created after REMOVED: the matcher starts it from the definition's reference.
+                final boolean fresh = known == null || known.state == null || known.state == SymbolState.REMOVED;
+                final ShardState.Symbol s = fresh ? new ShardState.Symbol() : known;
+                sh.symbols.put(id, s);
                 s.symbolId = id;
                 s.ticker = symbolDefined.ticker().trim();
                 s.tickSize = symbolDefined.tickSize();
@@ -506,6 +528,17 @@ public final class Engine
                 s.priceBandBps = (int)symbolDefined.priceBandBps();
                 s.maxOrderQty = symbolDefined.maxOrderQty();
                 s.state = symbolDefined.state();
+                s.dynamicBandBps = (int)symbolDefined.dynamicBandBps();
+                s.volatilityAuctionNs = symbolDefined.volatilityAuctionNs();
+                if (s.state != SymbolState.AUCTION_CALL)
+                {
+                    clearVolatilityAuction(s);
+                }
+                final long sentRef = fresh ? Long.MIN_VALUE : sentReferencePrice(sh, symbolDefined.correlationId());
+                if (sentRef != Long.MIN_VALUE && sentRef != s.referencePrice)
+                {
+                    s.venueReference = true; // an update whose reference the matcher kept for its own
+                }
                 s.lastCorrelationId = symbolDefined.correlationId();
                 s.eventSeq = seq;
                 sh.dirtySymbols.add(id);
@@ -518,6 +551,16 @@ public final class Engine
                 if (s != null)
                 {
                     s.state = stateChanged.newState();
+                    // Any state change ends a volatility auction; only an interruption starts one.
+                    if (s.state == SymbolState.AUCTION_CALL && stateChanged.cause() == StateChangeCause.VOLATILITY_INTERRUPTION)
+                    {
+                        s.volatilityAuction = true;
+                        s.volatilityAuctionSinceNs = sh.lastEventTsNs;
+                    }
+                    else
+                    {
+                        clearVolatilityAuction(s);
+                    }
                     s.lastCorrelationId = stateChanged.correlationId();
                     s.eventSeq = seq;
                     sh.dirtySymbols.add(s.symbolId);
@@ -571,6 +614,7 @@ public final class Engine
                     if (s.state != SymbolState.REMOVED && s.state != SymbolState.PRE_OPEN)
                     {
                         s.state = SymbolState.PRE_OPEN;
+                        clearVolatilityAuction(s);
                         s.eventSeq = seq;
                         sh.dirtySymbols.add(s.symbolId);
                     }
@@ -589,11 +633,67 @@ public final class Engine
                     }
                 }
             }
+            case ReferencePriceAppliedDecoder.TEMPLATE_ID ->
+            {
+                // day-cycle / band-stp: the venue moved the reference (day rollover to the close, end of a volatility
+                // auction that traded, or an external ReferencePrice). It owns the reference from now on.
+                refApplied.wrapAndApplyHeader(buffer, offset, header);
+                final ShardState.Symbol s = sh.symbols.get((int)refApplied.symbolId());
+                if (s != null)
+                {
+                    s.referencePrice = refApplied.referencePrice();
+                    s.bandLow = refApplied.bandLow();
+                    s.bandHigh = refApplied.bandHigh();
+                    s.venueReference = true;
+                    s.eventSeq = seq;
+                    sh.dirtySymbols.add(s.symbolId);
+                }
+            }
+            case ClosingPriceDecoder.TEMPLATE_ID ->
+            {
+                closingPrice.wrapAndApplyHeader(buffer, offset, header);
+                final ShardState.Symbol s = sh.symbols.get((int)closingPrice.symbolId());
+                if (s != null)
+                {
+                    s.closePrice = closingPrice.price();
+                    s.previousClose = closingPrice.previousClose();
+                    s.closeSource = String.valueOf(closingPrice.source());
+                    s.closeTradingDate = closingPrice.tradingDate();
+                    s.eventSeq = seq;
+                    sh.dirtySymbols.add(s.symbolId);
+                }
+            }
             default ->
             {
                 // order flow and market data events are not the control plane's business
             }
         }
+    }
+
+    /**
+     * The symbol shows the state a command asked for. A volatility auction does not satisfy an AUCTION_CALL target:
+     * the command asks for a takeover (cause COMMAND, AUCTION_CALL -> AUCTION_CALL), which clears the flag.
+     */
+    static boolean stateReached(final ShardState.Symbol s, final SymbolState target)
+    {
+        return s.state == target && !(target == SymbolState.AUCTION_CALL && s.volatilityAuction);
+    }
+
+    private static void clearVolatilityAuction(final ShardState.Symbol s)
+    {
+        s.volatilityAuction = false;
+        s.volatilityAuctionSinceNs = 0;
+    }
+
+    /** Reference price in the SymbolDefinition we sent with this correlation id, or the SBE null if not ours / unknown. */
+    private long sentReferencePrice(final ShardState sh, final long correlationId)
+    {
+        final TrackedCommand c = tracker.get(correlationId);
+        if (c == null || c.shardId != sh.shardId || c.kind != Kind.SYMBOL_DEFINITION || c.payload == null)
+        {
+            return Long.MIN_VALUE;
+        }
+        return sentDefinition.wrapAndApplyHeader(new UnsafeBuffer(c.payload), 0, sentHeader).referencePrice();
     }
 
     private void confirm(final ShardState sh, final long correlationId)
@@ -621,11 +721,11 @@ public final class Engine
                 if (c.symbolId >= 0)
                 {
                     final ShardState.Symbol s = sh.symbols.get(c.symbolId);
-                    return s != null && (s.state == c.target || (c.target != SymbolState.REMOVED && s.state == SymbolState.REMOVED));
+                    return s != null && (stateReached(s, c.target) || (c.target != SymbolState.REMOVED && s.state == SymbolState.REMOVED));
                 }
                 for (final ShardState.Symbol s : sh.symbols.values())
                 {
-                    if (s.state != c.target && SymbolStates.allowed(s.state, c.target))
+                    if (!stateReached(s, c.target) && (SymbolStates.allowed(s.state, c.target) || s.state == c.target))
                     {
                         return false;
                     }
@@ -783,7 +883,10 @@ public final class Engine
                     {
                         final ShardState.Symbol s = sh.symbols.get(id);
                         Store.saveObservedSymbol(c, new Store.ObservedSymbolRow(sh.shardId, id, s.ticker, s.tickSize, s.lotSize,
-                            s.referencePrice, s.priceBandBps, s.maxOrderQty, s.state.name(), s.lastCorrelationId, s.eventSeq));
+                            s.referencePrice, s.priceBandBps, s.maxOrderQty, s.state.name(), s.lastCorrelationId, s.eventSeq,
+                            s.dynamicBandBps, s.volatilityAuctionNs, s.volatilityAuction, s.volatilityAuctionSinceNs,
+                            s.venueReference, s.bandLow, s.bandHigh, s.closePrice, s.previousClose, s.closeSource,
+                            s.closeTradingDate));
                     }
                     for (final int id : sh.dirtyFirms)
                     {

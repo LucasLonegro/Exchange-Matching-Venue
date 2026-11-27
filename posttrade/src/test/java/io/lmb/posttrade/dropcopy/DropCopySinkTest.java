@@ -203,6 +203,28 @@ class DropCopySinkTest
     }
 
     @Test
+    void selfTradeCancelNamesItsReasonInText()
+    {
+        final long resting = venue.order(0, 100, Side.SELL, 10_000, 5);
+        final long taker = venue.order(0, 100, Side.BUY, 10_000, 5); // crosses its own firm's resting sell
+        startEngine();
+        startRunner();
+        final FixTestClient c = client("stp");
+        assertNotNull(c.logon(port, "C100", "100", "k100"));
+        final Set<String> e100 = expected(100);
+        assertEquals(1, e100.size(), "only the taker's cancel; no fill");
+        assertReports(c, "C100", e100);
+
+        final Map<Integer, String> cancel = c.reports("C100").get(0);
+        assertEquals("4", cancel.get(150), "ExecType CANCELED");
+        assertEquals(Long.toString(taker), cancel.get(11), "the incoming order is the one canceled");
+        assertEquals("SELF_TRADE", cancel.get(58), "Text names the cancel reason");
+        assertEquals("0", cancel.get(151), "LeavesQty");
+        assertNull(cancel.get(378), "no ExecRestatementReason");
+        assertTrue(resting != taker);
+    }
+
+    @Test
     void resumeFromAndExecTypesParse()
     {
         final DropCopySink.Client probe = new DropCopySink.Client("X", 2);

@@ -16,6 +16,7 @@ import java.util.Map;
  * NewOrder sessionId=1 clOrdId=7 firmId=1 accountId=1 symbolId=1 side=BUY ordType=LIMIT timeInForce=DAY price=10000 quantity=100
  * SymbolStateCommand correlationId=3 symbolId=null targetState=HALTED
  * SymbolDefinition correlationId=1 symbolId=1 ticker=ACME tickSize=1 lotSize=1 referencePrice=10000 maxOrderQty=100000 priceBandBps=1000 initialState=CONTINUOUS
+ * SymbolDefinition correlationId=2 symbolId=2 ticker=BETA tickSize=1 lotSize=1 referencePrice=5000 maxOrderQty=100000 priceBandBps=1000 dynamicBandBps=100 volatilityAuctionNs=300000000000 initialState=CONTINUOUS
  * </pre>
  *
  * The first token is the message name from schemas/venue.xml; every other token is {@code field=value} where the

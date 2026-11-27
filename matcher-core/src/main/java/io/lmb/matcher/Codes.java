@@ -28,6 +28,12 @@ final class Codes
     /** "No side" in internal fields (auction imbalance side). */
     static final byte NO_SIDE = 0;
 
+    // day-cycle: ClosePriceSource raw values
+    static final byte CLOSE_NONE = 0;
+    static final byte CLOSE_AUCTION = 1;
+    static final byte CLOSE_LAST_TRADE = 2;
+    static final byte CLOSE_PREVIOUS_CLOSE = 3;
+
     private Codes()
     {
     }

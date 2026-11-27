@@ -35,8 +35,13 @@ This is tested in `TwoPublishersTest` and `CheckpointRestartTest`.
   is always whole batches and books always sit on a batch boundary.
 - Each symbol has its own sequence `md_seq`, starting at 1, and every message for the symbol takes the next value.
   Mapping: `BookDelta` -> `LevelUpdate`, `Trade` -> `TradePrint`, `SymbolStateChanged` -> `SymbolStatus`,
-  `AuctionUpdate` -> `AuctionIndicative`, `SymbolDefined` -> `InstrumentDefinition`. `DayRolled` also emits a
-  `LevelUpdate` with quantity 0 for any level still resting on the shard's symbols.
+  `AuctionUpdate` -> `AuctionIndicative`, `SymbolDefined` -> `InstrumentDefinition`, `ReferencePriceApplied` ->
+  `ReferencePrice`, `ClosingPrice` -> `ClosingPrice`. `DayRolled` also emits a `LevelUpdate` with quantity 0 for any
+  level still resting on the shard's symbols.
+- Band rule: the band (`bandLow`, `bandHigh`) comes only from `ReferencePriceApplied`. The matcher emits one when a
+  symbol is defined with a reference price, so a freshly listed symbol has a band from its first messages
+  (`InstrumentDefinition` then `ReferencePrice`). An `InstrumentDefinition` that changes the reference price or
+  `priceBandBps` without a following `ReferencePriceApplied` clears the band (null) until the next one.
 - The last message of a symbol in a batch has `flags` bit 0 (`END_OF_BATCH`) set. A receiver that wants
   consistent books applies messages up to that flag before showing the book.
 - Events at or below the last eventSeq seen for a shard are dropped (at-least-once delivery). A gap in eventSeq
@@ -45,8 +50,8 @@ This is tested in `TwoPublishersTest` and `CheckpointRestartTest`.
 
 ## Wire format
 
-SBE schema `marketdata/src/main/resources/sbe/marketdata.xml` (schema id 2, little endian, generated package
-`io.lmb.marketdata.sbe`). Prices are integer cents; the null `Price` is `Long.MIN_VALUE`.
+SBE schema `marketdata/src/main/resources/sbe/marketdata.xml` (schema id 2, little endian, generated
+package `io.lmb.marketdata.sbe`). Prices are integer cents; the null `Price` is `Long.MIN_VALUE`.
 
 ```
 datagram = PacketHeader (24 bytes) frame*
@@ -62,18 +67,33 @@ publisher restarts; receivers use `md_seq`, not `packetSeq`, for ordering and lo
 |---|---|---|---|
 | 1 | `LevelUpdate` | incremental | SeqHeader, side, price, quantity (0 = level removed), orderCount |
 | 2 | `TradePrint` | incremental | SeqHeader, matchId, price, quantity, aggressorSide (null for auction), isAuction |
-| 3 | `SymbolStatus` | incremental | SeqHeader, state, previousState, reasonCode |
+| 3 | `SymbolStatus` | incremental | SeqHeader, state, previousState, reasonCode, cause |
 | 4 | `AuctionIndicative` | incremental | SeqHeader, price, matched and imbalance quantity, imbalanceSide, isFinal |
-| 5 | `InstrumentDefinition` | incremental | SeqHeader, tickSize, lotSize, referencePrice, ticker, state |
+| 5 | `InstrumentDefinition` | incremental | SeqHeader, tickSize, lotSize, referencePrice, ticker, state, priceBandBps, dynamicBandBps, volatilityAuctionNs |
+| 6 | `ReferencePrice` | incremental | SeqHeader, referencePrice, bandLow, bandHigh (inclusive limit price band now in force) |
+| 7 | `ClosingPrice` | incremental | SeqHeader, price (null when source is NONE), previousClose, tradingDate (yyyymmdd, 0 before the first rollover), source |
 | 10-12 | `SnapshotBegin`, `SnapshotLevels`*, `SnapshotEnd` | snapshot, TCP | book of one symbol as of `lastSeq` |
 | 20 | `Heartbeat` | both | sent on a channel that was idle for `heartbeatIntervalMs` (messageCount 1, no md_seq) |
 | 30, 31 | `RetransmitRequest`, `RetransmitResponse` | TCP | see below |
 | 32 | `SnapshotRequest` | TCP | answered by a `RetransmitResponse` (status OK, messageCount = frames) and the snapshot frames |
 
-`SeqHeader` (first field of ids 1-5): `seq` (md_seq), `transactTimeNs` (cluster time of the log entry), `symbolId`, `flags`.
+`SeqHeader` (first field of ids 1-7): `seq` (md_seq), `transactTimeNs` (cluster time of the log entry), `symbolId`, `flags`.
 A snapshot's `lastSeq` is the md_seq of the last incremental it includes; the receiver continues at `lastSeq + 1`.
-`SnapshotBegin` also carries tick and lot size, ticker, state and the level counts; `SnapshotLevels` hold at most a
-fixed number of levels (bids best first, then asks best first) so each frame fits in a datagram.
+`SnapshotBegin` also carries tick and lot size, ticker, state and the level counts, and everything a late
+joiner needs for the day cycle: `referencePrice`, `bandLow`/`bandHigh` (null under the band rule above),
+`priceBandBps`, `dynamicBandBps`, `volatilityAuctionNs`, the last close (`closePrice`, `previousClose`,
+`closeTradingDate`, `closeSource`; `closeSource` null if no `ClosingPrice` was published yet) and `stateCause` (of
+the last `SymbolStatus`, null if none). `SnapshotLevels` hold at most a fixed number of levels (bids best first, then
+asks best first) so each frame fits in a datagram.
+
+`StateCause` (same values as the venue's `StateChangeCause`): `COMMAND` (operator or schedule),
+`VOLATILITY_INTERRUPTION` (the matcher started a volatility auction), `VOLATILITY_AUCTION_END` (its timer uncrossed
+it), `DAY_ROLLOVER`. `CloseSource`: `AUCTION`, `LAST_TRADE`, `PREVIOUS_CLOSE`, `NONE`. A venue value this schema does
+not know is published as the null value (`NULL_VAL`), never as a wrong name.
+
+`ReferencePrice` is published when the matcher applies a reference price: at listing, after a volatility auction
+that traded (the uncross price), at a day rollover (the official close) and by command. The last `ClosingPrice`
+before a `DayRollover` is the official close; it becomes the next day's reference price.
 
 ### TCP retransmission
 
@@ -113,10 +133,17 @@ feed from a dead one.
 
 **gRPC.** `MarketData.Subscribe(symbols, depth, conflation_ms)` on `lmb.md.<i>.grpcPort`. The stream starts with
 a `BookSnapshot` per matching symbol (`md_seq` = last message it includes, `depth` levels per side, 0 = full book),
-then trades, status and auction updates as they happen, and book incrementals per log entry
+then trades, status (with `cause`), auction, `reference` and `close` updates as they happen, and book incrementals
+per log entry
 (`conflation_ms = 0`) or at most one per symbol per interval. Limits: depth <= 10000, conflation_ms <= 60000,
 else INVALID_ARGUMENT. A subscriber more than `grpcMaxQueued` updates behind is closed with RESOURCE_EXHAUSTED;
 reconnect and you get fresh snapshots. Over gRPC md_seq is informative only (conflation skips values).
+
+Proto day-cycle content: `SymbolStatus.cause` (StateChangeCause name); `MarketDataUpdate.body` cases `reference` (`ReferencePrice`: `reference_price_cents`/`has_reference_price`,
+`band_low_cents`, `band_high_cents`, `has_band`) and `close` (`ClosingPrice`: `price_cents`/`has_price`,
+`previous_close_cents`/`has_previous_close`, `trading_date`, `source`); `BookSnapshot.state_cause`, `reference` and
+`last_close` (unset when not known yet). `scripts/lmb-run io.lmb.tools.MarketDataWatchMain --topology F [--md 0]
+[--symbols AAPL]` prints the stream one line per update.
 
 ## Running
 
@@ -145,7 +172,8 @@ This keeps a restarted publisher from flooding the network with history.
 
 - `state.bin` in `<lmb.data.dir>/marketdata/<instance>/`: per shard the eventSeq of the last applied
   `CommandApplied`, per symbol md_seq, parameters and book; CRC32; written every `checkpointIntervalMs` (only if
-  something changed) and on stop, through a temp file, fsync and atomic rename.
+  something changed) and on stop, through a temp file, fsync and atomic rename. Per symbol it also holds the
+  band parameters, the reference band, the last close and the state cause.
 - On start the publisher reads each stream after the checkpoint's eventSeq. Events redelivered at or below it are
   dropped, so a clean restart publishes no message twice and continues md_seq where it stopped.
 - After a crash the checkpoint may be older than what was published. The publisher then republishes the messages
@@ -204,8 +232,10 @@ to datagram sent) and `event_to_publish_ns` (cluster timestamp to send; includes
 
 ## Tests
 
-`./mvnw -q -pl marketdata test` (about 15 s): BookBuilderTest 5, FeedRecoveryTest 7, GrpcSubscribeTest 5,
-CheckpointRestartTest 3, TwoPublishersTest 2, PublisherMainTest 3. They run against `testkit`'s `InMemoryVenue` with
+`./mvnw -q -pl marketdata test` (32 tests): BookBuilderTest 5, FeedRecoveryTest 8, GrpcSubscribeTest 6,
+DayCycleMdTest 5, CheckpointRestartTest 3, TwoPublishersTest 2, PublisherMainTest 3. `DayCycleMdTest` drives a
+volatility interruption, its timed uncross and two day rollovers and checks cause, `ReferencePrice`, `ClosingPrice`,
+the `SnapshotBegin` day-cycle fields and the checkpoint round trip. They run against `testkit`'s `InMemoryVenue` with
 the real `matcher-core` state machine; `GatedVenue` (test) imitates the cluster client's connecting, redelivery and
 loss behaviour.
 

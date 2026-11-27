@@ -106,10 +106,24 @@ final class Invariants
             require(fs.openBuyQty == q[0] && fs.openSellQty == q[1], "open qty firm-symbol");
             checkList(fs.orders, Order.L_FS, o -> o.fs == fs);
         }
+        int running = 0;
         for (final Symbol s : m.symbols)
         {
             checkList(s.orders, Order.L_SYMBOL, o -> o.symbol == s);
+            // band-stp: a volatility timer runs only in AUCTION_CALL and is indexed in volTimers
+            if (s.volTimerId != 0)
+            {
+                running++;
+                require(s.state == Codes.AUCTION_CALL, "volatility auction outside AUCTION_CALL");
+                require(m.volTimers.get(s.volTimerId) == s.idx, "volTimers index");
+                require(s.volEndNs > 0, "volatility auction has a deadline");
+            }
+            else
+            {
+                require(s.volEndNs == 0, "no deadline without a volatility timer");
+            }
         }
+        require(m.volTimers.size() == running, "volTimers has no stale entries");
         int sessionTotal = 0;
         for (final Session se : m.sessions)
         {

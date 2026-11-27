@@ -26,12 +26,14 @@ public final class Commands
     }
 
     public static byte[] symbolDefinition(final long correlationId, final int symbolId, final String ticker, final long tickSize,
-        final long lotSize, final long referencePrice, final int priceBandBps, final long maxOrderQty, final SymbolState initial)
+        final long lotSize, final long referencePrice, final int priceBandBps, final long maxOrderQty, final int dynamicBandBps,
+        final long volatilityAuctionNs, final SymbolState initial)
     {
         final UnsafeBuffer b = new UnsafeBuffer(new byte[128]);
         final SymbolDefinitionEncoder e = new SymbolDefinitionEncoder().wrapAndApplyHeader(b, 0, new MessageHeaderEncoder());
         e.correlationId(correlationId).tickSize(tickSize).lotSize(lotSize).referencePrice(referencePrice)
-            .maxOrderQty(maxOrderQty).symbolId(symbolId).priceBandBps(priceBandBps).ticker(ticker).initialState(initial);
+            .maxOrderQty(maxOrderQty).symbolId(symbolId).priceBandBps(priceBandBps).ticker(ticker).initialState(initial)
+            .volatilityAuctionNs(volatilityAuctionNs).dynamicBandBps(dynamicBandBps);
         return copy(b, MessageHeaderEncoder.ENCODED_LENGTH + e.encodedLength());
     }
 

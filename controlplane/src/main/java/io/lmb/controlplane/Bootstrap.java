@@ -39,7 +39,8 @@ public final class Bootstrap
                 for (final SymbolDirectory.Symbol s : symbols.all())
                 {
                     Store.upsertSymbol(c, new Store.SymbolRow(s.symbolId(), s.ticker(), s.shard(), s.tickSize(), s.lotSize(),
-                        s.referencePrice(), s.priceBandBps(), s.maxOrderQty(), "ACTIVE", null, nowMs), nowMs);
+                        s.referencePrice(), s.priceBandBps(), s.maxOrderQty(), s.dynamicBandBps(), s.volatilityAuctionNs(), "ACTIVE", null,
+                        nowMs), nowMs);
                 }
                 for (final FirmDirectory.Firm f : firms.all())
                 {

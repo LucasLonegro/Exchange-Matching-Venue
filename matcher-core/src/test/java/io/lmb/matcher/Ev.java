@@ -3,6 +3,7 @@ package io.lmb.matcher;
 import io.lmb.common.Events;
 import io.lmb.sbe.AuctionUpdateDecoder;
 import io.lmb.sbe.BookDeltaDecoder;
+import io.lmb.sbe.ClosingPriceDecoder;
 import io.lmb.sbe.CommandAppliedDecoder;
 import io.lmb.sbe.CommandRejectedDecoder;
 import io.lmb.sbe.DayRolledDecoder;
@@ -69,7 +70,8 @@ final class Ev
     SymbolStateChangedDecoder stateChanged()
     {
         check(SymbolStateChangedDecoder.TEMPLATE_ID);
-        return new SymbolStateChangedDecoder().wrap(buf, HDR, SymbolStateChangedDecoder.BLOCK_LENGTH, 1);
+        return new SymbolStateChangedDecoder().wrap(buf, HDR, SymbolStateChangedDecoder.BLOCK_LENGTH,
+            SymbolStateChangedDecoder.SCHEMA_VERSION);
     }
 
     CommandRejectedDecoder rejected()
@@ -112,6 +114,12 @@ final class Ev
     {
         check(DayRolledDecoder.TEMPLATE_ID);
         return new DayRolledDecoder().wrap(buf, HDR, DayRolledDecoder.BLOCK_LENGTH, 1);
+    }
+
+    ClosingPriceDecoder closingPrice()
+    {
+        check(ClosingPriceDecoder.TEMPLATE_ID);
+        return new ClosingPriceDecoder().wrap(buf, HDR, ClosingPriceDecoder.BLOCK_LENGTH, ClosingPriceDecoder.SCHEMA_VERSION);
     }
 
     private void check(final int t)
@@ -158,7 +166,7 @@ final class Ev
             {
                 final SymbolStateChangedDecoder d = stateChanged();
                 return "STATE corr=" + d.correlationId() + " sym=" + d.symbolId() + " rc=" + d.reasonCode() + " " +
-                    d.previousState() + "->" + d.newState();
+                    d.previousState() + "->" + d.newState() + " cause=" + d.cause();
             }
             case AuctionUpdateDecoder.TEMPLATE_ID:
             {
@@ -200,6 +208,12 @@ final class Ev
             {
                 final DayRolledDecoder d = dayRolled();
                 return "DAYROLLED corr=" + d.correlationId() + " date=" + d.tradingDate() + " n=" + d.expiredOrders();
+            }
+            case ClosingPriceDecoder.TEMPLATE_ID:
+            {
+                final ClosingPriceDecoder d = closingPrice();
+                return "CLOSE sym=" + d.symbolId() + " px=" + d.price() + " prev=" + d.previousClose() + " date=" +
+                    d.tradingDate() + " src=" + d.source();
             }
             case CommandAppliedDecoder.TEMPLATE_ID:
             {

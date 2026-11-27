@@ -125,6 +125,22 @@ class FixGatewayTest
     }
 
     @Test
+    void fixSelfTradeCancelNamesItsReasonInText() throws Exception
+    {
+        final Gateway g = fixGateway();
+        final FixClient c = new FixClient("stp");
+        fixClients.add(c);
+        final Session s = c.logon(g, "1001", "100", "alpha-key");
+        assertNotNull(s, "logon accepted");
+
+        c.newOrder(s, "21", "AAPL", Side.BUY, 10, 2); // ScriptedShard cancels a limit at 2 cents with SELF_TRADE
+        final Map<Integer, String> canceled = c.await(m -> "8".equals(m.get(35)) && "21".equals(m.get(11)) && "4".equals(m.get(150)));
+        assertEquals("4", canceled.get(39));
+        assertEquals("SELF_TRADE", canceled.get(58));
+        assertEquals("0", canceled.get(151));
+    }
+
+    @Test
     void fixLogonWithWrongPasswordIsRefused() throws Exception
     {
         final Gateway g = fixGateway();

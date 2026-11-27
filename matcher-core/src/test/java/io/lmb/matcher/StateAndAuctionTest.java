@@ -61,7 +61,7 @@ class StateAndAuctionTest
         assertEquals(List.of("CMDREJ corr=5 t=12 r=INVALID_STATE_TRANSITION"), t(h.send(Cmd.state(5, SYM, SymbolState.PRE_OPEN, 0))));
         assertEquals(List.of("CMDREJ corr=6 t=12 r=INVALID_STATE_TRANSITION"), t(h.send(Cmd.state(6, SYM, SymbolState.CONTINUOUS, 0))));
         assertEquals(List.of("CMDREJ corr=7 t=12 r=UNKNOWN_SYMBOL"), t(h.send(Cmd.state(7, 42, SymbolState.HALTED, 0))));
-        assertEquals(List.of("STATE corr=8 sym=1 rc=7 CONTINUOUS->HALTED"), t(h.send(Cmd.state(8, SYM, SymbolState.HALTED, 0))));
+        assertEquals(List.of("STATE corr=8 sym=1 rc=7 CONTINUOUS->HALTED cause=COMMAND"), t(h.send(Cmd.state(8, SYM, SymbolState.HALTED, 0))));
         assertEquals(List.of("CMDREJ corr=9 t=12 r=MALFORMED"), t(h.send(Cmd.poke(Cmd.state(9, SYM, SymbolState.HALTED, 0), 22, 9))));
     }
 
@@ -131,7 +131,7 @@ class StateAndAuctionTest
         assertEquals(List.of("1x4=30", "2x4=10", "2x5=40", "3x5=10"), trades);
         final Ev fin = evs.get(evs.size() - 2);
         assertEquals("AUCT sym=1 px=10100 v=90 imb=10 side=1 final=TRUE", fin.text());
-        assertEquals("STATE corr=2 sym=1 rc=7 AUCTION_CALL->CONTINUOUS", evs.get(evs.size() - 1).text());
+        assertEquals("STATE corr=2 sym=1 rc=7 AUCTION_CALL->CONTINUOUS cause=COMMAND", evs.get(evs.size() - 1).text());
         // remaining book: bid 3 (10 left) @10100, ask 6 @10300: uncrossed
         assertEquals(10, h.m.symbols.get(0).bids.best().totalQty);
         assertEquals(10_300, h.m.symbols.get(0).asks.best().price);
@@ -170,7 +170,7 @@ class StateAndAuctionTest
         final List<Ev> evs = h.send(Cmd.state(2, SYM, SymbolState.CONTINUOUS, 0));
         assertEquals(List.of(
             "AUCT sym=1 px=-9223372036854775808 v=0 imb=0 side=255 final=TRUE",
-            "STATE corr=2 sym=1 rc=7 AUCTION_CALL->CONTINUOUS"), t(evs));
+            "STATE corr=2 sym=1 rc=7 AUCTION_CALL->CONTINUOUS cause=COMMAND"), t(evs));
     }
 
     @Test
@@ -182,13 +182,14 @@ class StateAndAuctionTest
         h.send(Cmd.limit(SB, 2, B, SYM, Side.SELL, 10_500, 10));
         final List<Ev> evs = h.send(Cmd.state(3, SYM, SymbolState.CLOSED, 0));
         assertKinds(evs, "TRADE", "ER:PARTIAL_FILL", "ER:FILL", "DELTA", "DELTA", "AUCT", "STATE",
-            "ER:EXPIRED", "ER:EXPIRED", "DELTA", "DELTA");
+            "ER:EXPIRED", "ER:EXPIRED", "DELTA", "DELTA", "CLOSE");
+        assertEquals("CLOSE sym=1 px=10000 prev=" + Cmd.NULL + " date=0 src=AUCTION", evs.get(11).text());
         assertEquals(CancelReason.END_OF_DAY, evs.get(7).er().cancelReason());
         assertEquals(1, evs.get(7).er().orderId());
         assertEquals(10, h.m.firmSymbols.get(0).netPosition); // A bought 10
         assertEquals(0, h.m.allOrders.size);
         assertReject(h.send(Cmd.limit(SA, 9, A, SYM, Side.BUY, 10_000, 1)), RejectReason.SYMBOL_CLOSED);
-        assertEquals(List.of("STATE corr=4 sym=1 rc=7 CLOSED->PRE_OPEN"), t(h.send(Cmd.state(4, SYM, SymbolState.PRE_OPEN, 0))));
+        assertEquals(List.of("STATE corr=4 sym=1 rc=7 CLOSED->PRE_OPEN cause=COMMAND"), t(h.send(Cmd.state(4, SYM, SymbolState.PRE_OPEN, 0))));
     }
 
     @Test
@@ -197,7 +198,7 @@ class StateAndAuctionTest
         final Harness h = auction();
         h.send(Cmd.limit(SA, 1, A, SYM, Side.BUY, 10_100, 10));
         h.send(Cmd.limit(SB, 1, B, SYM, Side.SELL, 9_900, 10));
-        assertEquals(List.of("STATE corr=2 sym=1 rc=7 AUCTION_CALL->HALTED"), t(h.send(Cmd.state(2, SYM, SymbolState.HALTED, 0))));
+        assertEquals(List.of("STATE corr=2 sym=1 rc=7 AUCTION_CALL->HALTED cause=COMMAND"), t(h.send(Cmd.state(2, SYM, SymbolState.HALTED, 0))));
         final List<Ev> evs = h.send(Cmd.state(3, SYM, SymbolState.CONTINUOUS, 0));
         assertKinds(evs, "TRADE", "ER:FILL", "ER:FILL", "DELTA", "DELTA", "AUCT", "STATE");
     }
@@ -325,18 +326,23 @@ class StateAndAuctionTest
         h.send(Cmd.limit(SB, 1, B, SYM, Side.SELL, 9_900, 4));
         h.send(Cmd.limit(SA, 2, A, 2, Side.BUY, 9_900, 10));
         final List<Ev> evs = h.send(Cmd.dayRoll(77, 20261117));
-        assertKinds(evs, "ER:EXPIRED", "ER:EXPIRED", "DELTA", "DELTA", "STATE", "STATE", "DAYROLLED");
+        // per symbol: implicit close (neither symbol entered CLOSED), state reset, reference from the close
+        assertKinds(evs, "ER:EXPIRED", "ER:EXPIRED", "DELTA", "DELTA", "CLOSE", "STATE", "REF", "CLOSE", "STATE", "DAYROLLED");
         assertEquals(4, evs.get(0).er().cumQty()); // cum kept on the report
-        assertEquals("STATE corr=77 sym=1 rc=0 CONTINUOUS->PRE_OPEN", evs.get(4).text());
-        assertEquals("STATE corr=77 sym=2 rc=0 AUCTION_CALL->PRE_OPEN", evs.get(5).text());
-        assertEquals("DAYROLLED corr=77 date=20261117 n=2", evs.get(6).text());
-        assertEquals(0, h.m.firms.get(0).creditUsed());
-        assertEquals(0, h.m.firmSymbols.get(0).netPosition);
+        assertEquals("CLOSE sym=1 px=9900 prev=" + Cmd.NULL + " date=0 src=LAST_TRADE", evs.get(4).text());
+        assertEquals("STATE corr=77 sym=1 rc=0 CONTINUOUS->PRE_OPEN cause=DAY_ROLLOVER", evs.get(5).text());
+        assertEquals("REF sym=1 ref=9900 bid=" + Cmd.NULL + " ofr=" + Cmd.NULL + " band=8910..10890 ts=" + h.now, evs.get(6).text());
+        assertEquals("CLOSE sym=2 px=" + Cmd.NULL + " prev=" + Cmd.NULL + " date=0 src=NONE", evs.get(7).text());
+        assertEquals("STATE corr=77 sym=2 rc=0 AUCTION_CALL->PRE_OPEN cause=DAY_ROLLOVER", evs.get(8).text());
+        assertEquals("DAYROLLED corr=77 date=20261117 n=2", evs.get(9).text());
+        assertEquals(0, h.m.firms.get(0).creditUsed()); // daily credit usage reset ...
+        assertEquals(4, h.m.firmSymbols.get(0).netPosition); // ... but the position carries over
+        assertEquals(-4, h.m.firmSymbols.get(1).netPosition);
         // clOrdIds can be reused after the roll
         h.send(Cmd.state(1, SYM, SymbolState.CONTINUOUS, 0));
         assertKinds(h.send(Cmd.limit(SA, 1, A, SYM, Side.BUY, 9_900, 10)), "ER:NEW", "DELTA");
-        assertEquals(List.of("DAYROLLED corr=78 date=20261118 n=1"),
-            t(h.send(Cmd.dayRoll(78, 20261118))).subList(3, 4));
+        final List<String> roll = t(h.send(Cmd.dayRoll(78, 20261118)));
+        assertEquals("DAYROLLED corr=78 date=20261118 n=1", roll.get(roll.size() - 1));
     }
 
     @Test
@@ -354,7 +360,8 @@ class StateAndAuctionTest
         // the trading date survives a snapshot, and the next date rolls normally
         final Harness r = h.restoreCopy();
         assertEquals(20261117, r.m.tradingDate);
-        assertEquals(List.of("DAYROLLED corr=80 date=20261118 n=1"), t(h.send(Cmd.dayRoll(80, 20261118))).subList(3, 4));
+        final List<String> roll = t(h.send(Cmd.dayRoll(80, 20261118)));
+        assertEquals("DAYROLLED corr=80 date=20261118 n=1", roll.get(roll.size() - 1));
     }
 
     @Test
@@ -367,9 +374,9 @@ class StateAndAuctionTest
         assertEquals(List.of(), t(h.send(Cmd.state(12, SYM, SymbolState.PRE_OPEN, t0 + 3_000_000)))); // invalid when it fires
         assertEquals(3, h.timersById.size());
         h.send(Cmd.limit(SA, 1, A, SYM, Side.BUY, 9_900, 10));
-        assertEquals(List.of("STATE corr=10 sym=1 rc=7 CONTINUOUS->HALTED"), t(h.advanceTo(t0 + 1_500_000)));
+        assertEquals(List.of("STATE corr=10 sym=1 rc=7 CONTINUOUS->HALTED cause=COMMAND"), t(h.advanceTo(t0 + 1_500_000)));
         assertReject(h.send(Cmd.limit(SA, 2, A, SYM, Side.BUY, 9_900, 10)), RejectReason.SYMBOL_HALTED);
-        assertEquals(List.of("STATE corr=11 sym=1 rc=7 HALTED->CONTINUOUS",
+        assertEquals(List.of("STATE corr=11 sym=1 rc=7 HALTED->CONTINUOUS cause=COMMAND",
             "CMDREJ corr=12 t=12 r=INVALID_STATE_TRANSITION"), t(h.advanceTo(t0 + 5_000_000)));
         assertEquals(0, h.m.pending.size());
         // a timer we do not know (or already consumed) is just an empty entry
@@ -384,9 +391,9 @@ class StateAndAuctionTest
         final Harness h = new Harness().standard();
         h.send(Cmd.symbol(2, 2, "MSFT", 1, 1, 10_000, 1_000_000, 1000, SymbolState.HALTED));
         h.send(Cmd.symbol(3, 3, "AMZN", 1, 1, 10_000, 1_000_000, 1000, SymbolState.PRE_OPEN));
-        assertEquals(List.of("STATE corr=5 sym=1 rc=7 CONTINUOUS->HALTED"), t(h.send(Cmd.state(5, Cmd.ALL_SYMBOLS, SymbolState.HALTED, 0))));
-        assertEquals(List.of("STATE corr=6 sym=1 rc=7 HALTED->CONTINUOUS", "STATE corr=6 sym=2 rc=7 HALTED->CONTINUOUS",
-            "STATE corr=6 sym=3 rc=7 PRE_OPEN->CONTINUOUS"), t(h.send(Cmd.state(6, Cmd.ALL_SYMBOLS, SymbolState.CONTINUOUS, 0))));
+        assertEquals(List.of("STATE corr=5 sym=1 rc=7 CONTINUOUS->HALTED cause=COMMAND"), t(h.send(Cmd.state(5, Cmd.ALL_SYMBOLS, SymbolState.HALTED, 0))));
+        assertEquals(List.of("STATE corr=6 sym=1 rc=7 HALTED->CONTINUOUS cause=COMMAND", "STATE corr=6 sym=2 rc=7 HALTED->CONTINUOUS cause=COMMAND",
+            "STATE corr=6 sym=3 rc=7 PRE_OPEN->CONTINUOUS cause=COMMAND"), t(h.send(Cmd.state(6, Cmd.ALL_SYMBOLS, SymbolState.CONTINUOUS, 0))));
     }
 
     @Test
@@ -435,7 +442,7 @@ class StateAndAuctionTest
             b.getBytes(o, copy);
             texts.add(new Ev(copy).text());
         }, 1000);
-        assertTrue(texts.contains("STATE corr=1 sym=1 rc=7 PRE_OPEN->AUCTION_CALL"), texts::toString);
+        assertTrue(texts.contains("STATE corr=1 sym=1 rc=7 PRE_OPEN->AUCTION_CALL cause=COMMAND"), texts::toString);
         assertTrue(texts.contains("AUCT sym=1 px=10000 v=10 imb=0 side=255 final=TRUE"), texts::toString);
         assertTrue(texts.stream().anyMatch(s -> s.startsWith("TRADE") && s.contains("auct=TRUE")));
         assertEquals(0, venue.eventCount(1));

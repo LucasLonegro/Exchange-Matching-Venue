@@ -188,8 +188,14 @@ public final class AdminExecutor implements Engine.Duty
             {
                 final Store.SymbolRow r = symbol(engine, p);
                 final boolean auction = bool(p, "auction", false);
+                final boolean force = bool(p, "force", false);
+                if (!auction && !force && inVolatilityAuction(engine, r))
+                {
+                    throw new Rejected("symbol " + r.symbolId() + " is in a volatility auction; the venue ends it " +
+                        "(resume with auction=true takes it over, force=true ends it now)");
+                }
                 setOperatorState(engine, r.symbolId(), auction ? "AUCTION_CALL" : null, nowMs);
-                yield transition(engine, auditId, r, auction ? SymbolState.AUCTION_CALL : calendarTarget(engine, r.shardId()), null);
+                yield transition(engine, auditId, r, auction ? SymbolState.AUCTION_CALL : calendarTarget(engine, r.shardId()), null, force);
             }
             case "AUCTION_START" ->
             {
@@ -210,8 +216,14 @@ public final class AdminExecutor implements Engine.Duty
                 {
                     throw new Rejected("symbol " + r.symbolId() + " is not in AUCTION_CALL (" + (obs == null ? "undefined" : obs.state) + ")");
                 }
+                final boolean force = bool(p, "force", false);
+                if (obs.volatilityAuction && !force)
+                {
+                    throw new Rejected("symbol " + r.symbolId() + " is in a volatility auction; the venue ends it " +
+                        "(force=true ends it now)");
+                }
                 setOperatorState(engine, r.symbolId(), null, nowMs);
-                yield transition(engine, auditId, r, target, null);
+                yield transition(engine, auditId, r, target, null, force);
             }
             case "HALT_MARKET", "RESUME_MARKET" ->
             {
@@ -226,12 +238,34 @@ public final class AdminExecutor implements Engine.Duty
                     return null;
                 });
                 engine.reloadRefData();
+                final boolean force = bool(p, "force", false);
                 final List<TrackedCommand> out = new ArrayList<>();
+                int spared = 0;
                 for (final int s : shards)
                 {
-                    out.add(Reconciler.state(engine, s, -1, halt ? SymbolState.HALTED : calendarTarget(engine, s), 0, "ADMIN", auditId));
+                    final SymbolState target = halt ? SymbolState.HALTED : calendarTarget(engine, s);
+                    final ShardState sh = engine.shard(s);
+                    final boolean anyVolatility = sh.symbols.values().stream().anyMatch(o -> o.volatilityAuction);
+                    if (target != SymbolState.CONTINUOUS || force || !anyVolatility)
+                    {
+                        out.add(Reconciler.state(engine, s, -1, target, 0, "ADMIN", auditId));
+                        continue;
+                    }
+                    // A shard-wide CONTINUOUS would end the volatility auctions too: send what the matcher's shard-wide
+                    // loop would apply, per symbol, leaving the volatility auctions to their timers.
+                    for (final ShardState.Symbol o : sh.symbols.values())
+                    {
+                        if (o.volatilityAuction)
+                        {
+                            spared++;
+                        }
+                        else if (o.state != target && SymbolStates.allowed(o.state, target))
+                        {
+                            out.add(Reconciler.state(engine, s, o.symbolId, target, 0, "ADMIN", auditId));
+                        }
+                    }
                 }
-                yield new Result(out, null);
+                yield new Result(out, spared == 0 ? null : spared + " symbol(s) in a volatility auction left to the venue's timer");
             }
             case "UPDATE_LIMITS" ->
             {
@@ -318,7 +352,7 @@ public final class AdminExecutor implements Engine.Duty
                 {
                     final Store.SymbolRow r = symbol(engine, p);
                     row = new Store.SymbolRow(r.symbolId(), r.ticker(), r.shardId(), r.tickSize(), r.lotSize(), r.referencePrice(),
-                        r.priceBandBps(), r.maxOrderQty(), "REMOVED", r.operatorState(), nowMs);
+                        r.priceBandBps(), r.maxOrderQty(), r.dynamicBandBps(), r.volatilityAuctionNs(), "REMOVED", r.operatorState(), nowMs);
                 }
                 else
                 {
@@ -387,20 +421,37 @@ public final class AdminExecutor implements Engine.Duty
     private Result transition(final Engine engine, final long auditId, final Store.SymbolRow r, final SymbolState target,
         final String noteIfIdle)
     {
+        return transition(engine, auditId, r, target, noteIfIdle, false);
+    }
+
+    /**
+     * One command towards target. In a volatility auction, AUCTION_CALL takes it over and CONTINUOUS is not sent
+     * (the venue's timer ends it) unless force.
+     */
+    private Result transition(final Engine engine, final long auditId, final Store.SymbolRow r, final SymbolState target,
+        final String noteIfIdle, final boolean force)
+    {
         final ShardState sh = engine.shard(r.shardId());
         final ShardState.Symbol obs = sh.symbols.get(r.symbolId());
         if (target == null)
         {
             return new Result(List.of(), "override cleared; the calendar decides the state");
         }
-        final SymbolState hop = obs == null ? null : SymbolStates.nextHop(obs.state, target);
+        final SymbolState hop = obs == null ? null : SymbolStates.nextHop(obs.state, obs.volatilityAuction && !force, target);
         if (hop == null || (target == SymbolState.HALTED && hop != SymbolState.HALTED))
         {
-            return new Result(List.of(), "symbol is " + (obs == null ? "not defined yet" : obs.state) +
+            return new Result(List.of(), "symbol is " + (obs == null ? "not defined yet" : obs.state +
+                (obs.volatilityAuction ? " (volatility auction)" : "")) +
                 (noteIfIdle == null ? "; nothing to send" : "; " + noteIfIdle));
         }
         return new Result(List.of(Reconciler.state(engine, r.shardId(), r.symbolId(), hop, 0, "ADMIN", auditId)),
             hop == target ? null : "first step towards " + target);
+    }
+
+    private static boolean inVolatilityAuction(final Engine engine, final Store.SymbolRow r)
+    {
+        final ShardState.Symbol obs = engine.shard(r.shardId()).symbols.get(r.symbolId());
+        return obs != null && obs.volatilityAuction;
     }
 
     private SymbolState calendarTarget(final Engine engine, final int shardId)
@@ -503,6 +554,8 @@ public final class AdminExecutor implements Engine.Duty
             lng(p, "referencePrice", existing == null ? -1 : existing.referencePrice()),
             (int)lng(p, "priceBandBps", existing == null ? -1 : existing.priceBandBps()),
             lng(p, "maxOrderQty", existing == null ? -1 : existing.maxOrderQty()),
+            (int)lng(p, "dynamicBandBps", existing == null ? 0 : existing.dynamicBandBps()),
+            lng(p, "volatilityAuctionNs", existing == null ? 300_000_000_000L : existing.volatilityAuctionNs()),
             "ACTIVE", existing == null ? null : existing.operatorState(), nowMs);
     }
 

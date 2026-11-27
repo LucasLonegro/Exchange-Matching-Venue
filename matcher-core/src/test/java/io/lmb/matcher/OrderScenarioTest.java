@@ -224,20 +224,30 @@ class OrderScenarioTest
     void creditLimitCountsOpenOrdersBothSidesAndNetTradedNotional()
     {
         final Harness h = new Harness().standard();
+        final Firm a = h.m.firms.get(0);
         h.send(Cmd.risk(1, A, 1_000_000, 1_000_000, true)); // $10,000.00
-        assertKinds(h.send(Cmd.limit(SA, 1, A, SYM, Side.BUY, 10_000, 60)), "ER:NEW", "DELTA"); // 600,000
-        assertReject(h.send(Cmd.limit(SA, 2, A, SYM, Side.SELL, 10_100, 40)), RejectReason.CREDIT_LIMIT); // 404,000
-        assertKinds(h.send(Cmd.limit(SA, 3, A, SYM, Side.SELL, 10_000, 40)).subList(0, 1), "ER:NEW"); // exactly 1,000,000
-        final List<Ev> r = h.send(Cmd.risk(2, A, 1_000_000, 1_000_000, true));
-        assertEquals("RISK corr=2 f=100 budget=1000000 used=200000 maxPos=1000000 en=TRUE", r.get(0).text());
-        // fill 60 @ 10000 against B: open 600,000 -> traded +600,000
-        h.send(Cmd.limit(SB, 1, B, SYM, Side.SELL, 10_000, 60));
-        // A's own sell 40 matched A's buy 40 earlier (no self-trade prevention); usage now |net| + open
-        final long used = h.m.firms.get(0).creditUsed();
-        assertEquals(h.m.firms.get(0).openNotional + Math.abs(h.m.firms.get(0).tradedNet), used);
-        // budget below usage is accepted and blocks new orders, cancels still work
-        h.send(Cmd.risk(3, A, 0, 1_000_000, true));
-        assertReject(h.send(Cmd.limit(SA, 4, A, SYM, Side.BUY, 9_500, 1)), RejectReason.CREDIT_LIMIT);
+        assertKinds(h.send(Cmd.limit(SA, 1, A, SYM, Side.BUY, 9_000, 60)), "ER:NEW", "DELTA"); // 540,000
+        assertReject(h.send(Cmd.limit(SA, 2, A, SYM, Side.SELL, 10_000, 47)), RejectReason.CREDIT_LIMIT); // 470,000
+        assertKinds(h.send(Cmd.limit(SA, 3, A, SYM, Side.SELL, 10_000, 46)), "ER:NEW", "DELTA"); // exactly 1,000,000
+        assertEquals("RISK corr=2 f=100 budget=1000000 used=1000000 maxPos=1000000 en=TRUE",
+            h.send(Cmd.risk(2, A, 1_000_000, 1_000_000, true)).get(0).text());
+        // B lifts A's sell: open 460,000 becomes traded -460,000, usage unchanged
+        assertKinds(h.send(Cmd.limit(SB, 1, B, SYM, Side.BUY, 10_000, 46)), "ER:NEW", "TRADE", "ER:FILL", "ER:FILL", "DELTA");
+        assertEquals(540_000, a.openNotional);
+        assertEquals(-460_000, a.tradedNet);
+        assertEquals(1_000_000, a.creditUsed());
+        // B hits A's buy: the buys net against the sells, usage is |net traded| = 80,000
+        assertKinds(h.send(Cmd.limit(SB, 2, B, SYM, Side.SELL, 9_000, 60)), "ER:NEW", "TRADE", "ER:FILL", "ER:FILL", "DELTA");
+        assertEquals(0, a.openNotional);
+        assertEquals(80_000, a.tradedNet);
+        assertEquals(80_000, a.creditUsed());
+        assertKinds(h.send(Cmd.limit(SA, 4, A, SYM, Side.BUY, 9_500, 10)), "ER:NEW", "DELTA"); // +95,000
+        // budget below usage is accepted and blocks new orders, cancels still work and release the open notional
+        assertEquals("RISK corr=3 f=100 budget=0 used=175000 maxPos=1000000 en=TRUE",
+            h.send(Cmd.risk(3, A, 0, 1_000_000, true)).get(0).text());
+        assertReject(h.send(Cmd.limit(SA, 5, A, SYM, Side.BUY, 9_500, 1)), RejectReason.CREDIT_LIMIT);
+        assertKinds(h.send(Cmd.cancel(SA, 6, 4, A, SYM, false)), "ER:CANCELED", "DELTA");
+        assertEquals(80_000, a.creditUsed());
     }
 
     @Test

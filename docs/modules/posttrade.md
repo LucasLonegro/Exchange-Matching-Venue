@@ -27,7 +27,10 @@ after `restartBackoffMs` (the process keeps running).
   key for a session that receives every firm's reports (disabled when no admin key is configured).
 - Content: ExecutionReports whose exec type is in `execTypes` (default fills, partial fills, cancels, expiries), mapped
   like the gateway's FIX reports, plus LmbShardID(20001), LmbEventSeq(20002), LmbFirmID(20003), LmbSessionID(20004).
-  (LmbShardID, LmbEventSeq) identifies a report.
+  (LmbShardID, LmbEventSeq) identifies a report. A canceled or expired report names the venue's `CancelReason` in
+  Text(58); a self-trade prevention cancel (the incoming order of a firm that would have traded with the firm's own
+  resting order) is ExecType(150)=4, Text(58)=`SELF_TRADE`, LeavesQty(151)=0, no ExecRestatementReason(378), and no
+  fill is reported for either order.
 - Each client has a per-shard cursor (last event offered to it). On logon it catches up from its cursor with a private
   event stream reader, then switches to the live stream. A new client starts at the beginning of the retained stream;
   Logon tag LmbResumeFrom(20010) `shard:eventSeq;shard:eventSeq` overrides the stored cursor.
@@ -43,7 +46,8 @@ after `restartBackoffMs` (the process keeps running).
 ## Surveillance
 One JSON object per ExecutionReport (every exec type) and per Trade; other events only advance the cursor. Every record
 starts `{"shard":S,"eventSeq":N,"type":"ExecutionReport"|"Trade","timestampNs":...,"execId":...` followed by the
-decoded fields (prices in cents, enum names as strings). File mode: the file is its own cursor (on start a torn last
+decoded fields (prices in cents, enum names as strings; a self-trade prevention cancel is
+`"execType":"CANCELED"` with `"cancelReason":"SELF_TRADE"` and no Trade record). File mode: the file is its own cursor (on start a torn last
 line is truncated and the largest eventSeq per shard is the resume point); flush = write + fsync every
 `checkpointIntervalMs`. Kafka mode: key = shard id, idempotent producer, acks=all; the cursor
 (`<dataDir>/surveillance-kafka.ckpt`) moves only after a successful `flush()`.
@@ -85,9 +89,10 @@ close their sinks cleanly (final commit, checkpoint, FIX logouts), then the FIX 
 connection.
 
 ## Tests
-`./mvnw -q -pl posttrade test` (13 tests, no Docker or network): TradeStoreTest 6, CursorFileTest 1,
-DropCopySinkTest 3 (per-firm/ALL filtering over a real FIX initiator, catch-up then live, refused logons, clean restart
-without resend), SurveillanceSinkTest 2 (record content, recovery from lost and torn writes with redelivery),
+`./mvnw -q -pl posttrade test` (15 tests, no Docker or network): TradeStoreTest 6, CursorFileTest 1,
+DropCopySinkTest 4 (per-firm/ALL filtering over a real FIX initiator, catch-up then live, refused logons, clean restart
+without resend, SELF_TRADE cancel in Text(58)), SurveillanceSinkTest 3 (record content, recovery from lost and torn
+writes with redelivery, SELF_TRADE cancel record),
 PostTradeTest 1 (local profile end to end: READY line, metrics endpoint, restart on the same data dir without duplicates).
 Ports: drop copy tests FIX 37000-37049, PostTradeTest FIX 37050-37089 and metrics 37150-37189.
 

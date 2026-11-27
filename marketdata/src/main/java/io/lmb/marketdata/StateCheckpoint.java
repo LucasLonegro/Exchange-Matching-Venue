@@ -18,7 +18,7 @@ import java.util.zip.CRC32;
 
 /**
  * Publisher state at a batch boundary: per shard the eventSeq of the last applied CommandApplied, per
- * symbol its md_seq, parameters and book. Because the {@link BookBuilder} is a pure function of the event
+ * symbol its md_seq, parameters (with the reference band, the last close and the state cause) and book. Because the {@link BookBuilder} is a pure function of the event
  * streams, a builder restored from a checkpoint and fed the events after those eventSeqs produces exactly
  * the messages (same md_seq, same bytes) that the original produced or would have produced.
  *
@@ -66,6 +66,16 @@ public final class StateCheckpoint
                 out.writeLong(s.referencePrice);
                 out.writeInt(s.state);
                 out.write(s.ticker);
+                out.writeLong(s.priceBandBps);
+                out.writeLong(s.dynamicBandBps);
+                out.writeLong(s.volatilityAuctionNs);
+                out.writeLong(s.bandLow);
+                out.writeLong(s.bandHigh);
+                out.writeLong(s.closePrice);
+                out.writeLong(s.previousClose);
+                out.writeInt(s.closeTradingDate);
+                out.writeShort(s.closeSource);
+                out.writeShort(s.stateCause);
                 for (int side = OrderBook.BID; side <= OrderBook.ASK; side++)
                 {
                     final int n = s.book.levels(side);
@@ -156,6 +166,16 @@ public final class StateCheckpoint
             s.referencePrice = d.readLong();
             s.state = d.readInt();
             d.readFully(s.ticker);
+            s.priceBandBps = d.readLong();
+            s.dynamicBandBps = d.readLong();
+            s.volatilityAuctionNs = d.readLong();
+            s.bandLow = d.readLong();
+            s.bandHigh = d.readLong();
+            s.closePrice = d.readLong();
+            s.previousClose = d.readLong();
+            s.closeTradingDate = d.readInt();
+            s.closeSource = d.readShort();
+            s.stateCause = d.readShort();
             for (int side = OrderBook.BID; side <= OrderBook.ASK; side++)
             {
                 final int n = d.readInt();

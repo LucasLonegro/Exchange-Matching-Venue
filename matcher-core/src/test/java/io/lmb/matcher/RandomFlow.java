@@ -31,6 +31,9 @@ final class RandomFlow
     private long sourceTs = 1;
     private long corr = 1;
     private int date = 20260101;
+    // dynamic collar and volatility auction length carried by every symbol definition
+    private long dynBps;
+    private long volNs;
 
     RandomFlow(final long seed, final boolean controlCommands)
     {
@@ -43,13 +46,28 @@ final class RandomFlow
         }
     }
 
+    /** Every symbol definition carries this dynamic collar and volatility auction length. */
+    RandomFlow collar(final long dynBps, final long volNs)
+    {
+        this.dynBps = dynBps;
+        this.volNs = volNs;
+        return this;
+    }
+
+    byte[] symbol(
+        final long corr, final int symbol, final String ticker, final long tick, final long lot, final long ref,
+        final long maxQty, final long bps, final SymbolState initial)
+    {
+        return Cmd.symbol(corr, symbol, ticker, tick, lot, ref, maxQty, bps, initial, dynBps, volNs);
+    }
+
     /** Setup commands: three symbols (one with lot 10 and tick 5) and three firms with generous limits. */
     List<byte[]> setup()
     {
         return List.of(
-            Cmd.symbol(corr++, 1, "AAA", 1, 1, ref[0], 5_000, 500, SymbolState.CONTINUOUS),
-            Cmd.symbol(corr++, 2, "BBB", 1, 1, ref[1], 5_000, 1000, SymbolState.AUCTION_CALL),
-            Cmd.symbol(corr++, 3, "CCC", 5, 10, ref[2], 5_000, 300, SymbolState.CONTINUOUS),
+            symbol(corr++, 1, "AAA", 1, 1, ref[0], 5_000, 500, SymbolState.CONTINUOUS),
+            symbol(corr++, 2, "BBB", 1, 1, ref[1], 5_000, 1000, SymbolState.AUCTION_CALL),
+            symbol(corr++, 3, "CCC", 5, 10, ref[2], 5_000, 300, SymbolState.CONTINUOUS),
             Cmd.risk(corr++, 100, 50_000_000_000L, 20_000, true),
             Cmd.risk(corr++, 200, 50_000_000_000L, 20_000, true),
             Cmd.risk(corr++, 300, 300_000_000L, 3_000, true));
@@ -192,7 +210,7 @@ final class RandomFlow
         if (r < 995)
         {
             // symbol redefinition / new parameters
-            return Cmd.symbol(corr++, sym, "SYM" + sym, tick, lot, Cmd.NULL, 2_000 + rnd.nextInt(5_000),
+            return symbol(corr++, sym, "SYM" + sym, tick, lot, Cmd.NULL, 2_000 + rnd.nextInt(5_000),
                 200 + rnd.nextInt(1000), SymbolState.CONTINUOUS);
         }
         return Cmd.state(corr++, sym, rnd.nextInt(5) == 0 ? SymbolState.REMOVED : SymbolState.AUCTION_CALL, 0);
@@ -219,6 +237,9 @@ final class RandomFlow
     {
         for (int i = 0; i < n; i++)
         {
+            // reference prices are timestamped like a live source, so they stay newer than the reference a
+            // DayRollover sets from the close (applied with the roll's cluster time)
+            flow.sourceTs = Math.max(flow.sourceTs, h.now);
             byte[] c = flow.next();
             if (c.length > 8 && (c[2] & 0xFF) == 12)
             {
@@ -238,7 +259,7 @@ final class RandomFlow
             {
                 if (s.state == Codes.REMOVED)
                 {
-                    h.send(Cmd.symbol(flow.corr++, s.symbolId, "RE" + s.symbolId, s.symbolId == 3 ? 5 : 1,
+                    h.send(flow.symbol(flow.corr++, s.symbolId, "RE" + s.symbolId, s.symbolId == 3 ? 5 : 1,
                         s.symbolId == 3 ? 10 : 1, flow.ref[s.symbolId - 1], 5_000, 500, SymbolState.CONTINUOUS));
                 }
             }

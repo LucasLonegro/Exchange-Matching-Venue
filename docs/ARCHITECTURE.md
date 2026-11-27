@@ -5,16 +5,21 @@ until it is changed deliberately.
 
 ## 1. What the system is
 
-A single-region equities venue (limit and market orders, day-only, tick $0.01) built as a set of
-**shards**. Each shard is a replicated deterministic state machine:
+A single-region equities venue (limit and market orders, day-only; positions carry over days and each
+day ends with an official close per symbol; tick $0.01) built as a set of **shards**. Each shard is a
+replicated deterministic state machine:
 
 ```
 participants -> order gateways -> [ Raft input log -> risk + matcher -> event stream ] -> gateways (exec reports)
                                      ^        (one shard, Aeron Cluster)        |-> market data publisher
- feed handlers -> NBBO consolidator -+                                          |-> drop copy / Kafka / clearing
+ [feed handlers -> NBBO consolidator]+  (optional, legacy)                      |-> drop copy / Kafka / clearing
  control plane (scheduler, market ops, risk-budget allocator) ------------------+-> WORM archive, ClickHouse
                                                                                 |-> shadow replayer
 ```
+
+Each symbol's reference price (the centre of its price band) is the venue's own official close, carried to
+the next day by the day rollover, and the uncross price after a volatility auction. The NBBO consolidator and
+feed simulator in brackets are optional and off in the local profile (section 5.3).
 
 Rules that hold everywhere:
 
@@ -71,7 +76,7 @@ SymbolDefinition(11) SymbolStateCommand(12) RiskLimitUpdate(13) DayRollover(14)`
 
 Events: `ExecutionReport(101) Trade(102) BookDelta(103) SymbolStateChanged(104) AuctionUpdate(105)
 ReferencePriceApplied(106) MassCancelDone(107) RiskLimitApplied(108) SymbolDefined(109)
-CommandRejected(110) DayRolled(111) CommandApplied(120)`.
+CommandRejected(110) DayRolled(111) ClosingPrice(112) CommandApplied(120)`.
 
 Every event body starts with `EventHeader` (use `io.lmb.common.Events` for allocation-free access):
 `eventSeq` starts at 1 and increases by exactly 1 per event per shard; `eventIdx` restarts at 0 for
@@ -94,7 +99,8 @@ Symbol states (`SymbolState`)
 - `PRE_OPEN`: no new orders (`SYMBOL_CLOSED`), cancels allowed.
 - `AUCTION_CALL`: limit orders accumulate without matching, cancels and replaces allowed, market
   orders rejected (`MARKET_ORDER_NOT_ALLOWED`). An `AuctionUpdate(isFinal=FALSE)` is emitted whenever
-  the indicative price or quantities change.
+  the indicative price or quantities change. Entered by command (opening/closing auction) or by the
+  matcher (volatility auction, below).
 - `CONTINUOUS`: price-time priority matching.
 - `HALTED`: new orders and replaces rejected (`SYMBOL_HALTED`), cancels always allowed, book retained.
 - `CLOSED`: no orders; on entry all resting orders expire (`ExecType.EXPIRED`, `CancelReason.END_OF_DAY`).
@@ -105,7 +111,11 @@ Symbol states (`SymbolState`)
   price then time. Then `AuctionUpdate(isFinal=TRUE)`.
 - Allowed transitions: PRE_OPEN->AUCTION_CALL|CONTINUOUS|CLOSED, AUCTION_CALL->CONTINUOUS|HALTED|CLOSED,
   CONTINUOUS->HALTED|AUCTION_CALL|CLOSED, HALTED->AUCTION_CALL|CONTINUOUS|CLOSED, CLOSED->PRE_OPEN,
-  any->REMOVED. Anything else: `CommandRejected(INVALID_STATE_TRANSITION)`.
+  any->REMOVED, and AUCTION_CALL->AUCTION_CALL only while a volatility auction runs (takeover, below).
+  Anything else: `CommandRejected(INVALID_STATE_TRANSITION)`.
+- `SymbolStateChanged.cause`: `COMMAND` (a `SymbolStateCommand`, immediate or by its timer; correlationId
+  and reasonCode from the command), `VOLATILITY_INTERRUPTION` and `VOLATILITY_AUCTION_END` (matcher; correlationId
+  0, reasonCode 0), `DAY_ROLLOVER` (correlationId of the DayRollover, reasonCode 0).
 - `SymbolStateCommand.effectiveTimeNs > 0` schedules a timer through `TimerScheduler`; the transition
   applies in `onTimer`. Pending scheduled transitions are part of the snapshot.
 
@@ -120,7 +130,7 @@ Order handling in `CONTINUOUS`
   sweeps only prices inside the band and the remainder is canceled (`MARKET_COLLAR`, or the order is
   rejected with `NO_LIQUIDITY` if nothing was filled and the opposite side is empty).
   MARKET needs a reference price (`NO_REFERENCE_PRICE` otherwise).
-- Price band: `[ref * (1 - bps/10000), ref * (1 + bps/10000)]` rounded inward to the tick. Checked
+- Price band (static): `[ref * (1 - bps/10000), ref * (1 + bps/10000)]` rounded inward to the tick. Checked
   at entry and on replace. Resting orders are not re-checked when the reference price moves.
 - Cancel: `ExecutionReport(CANCELED, cancelReason=CLIENT)` with `clOrdId` = the cancel's id and
   `origClOrdId`. Unknown order: `CANCEL_REJECTED/UNKNOWN_ORDER`; already filled or canceled:
@@ -128,7 +138,36 @@ Order handling in `CONTINUOUS`
 - Replace: quantity decrease at the same price keeps time priority; a price change or quantity
   increase loses it (re-queued at the back, may match immediately). `newQuantity <= cumQty` is
   `INVALID_REPLACE`. Success: `ExecutionReport(REPLACED)`; the order is then known by the new `clOrdId`.
-- No self-trade prevention.
+- Self-trade prevention (cancel newest): an incoming order (new or replaced) never trades against a resting
+  order of the same firm (any session). Matching stops at the first such resting order; fills already done
+  stand; the incoming remainder is canceled (`SELF_TRADE`) whatever its type; the resting order is untouched.
+  Not applied to auction uncrosses.
+
+Dynamic collar and volatility interruption (`SymbolDefinition.dynamicBandBps > 0`)
+- Collar: `[c * (1 - dyn/10000), c * (1 + dyn/10000)]`, where the centre `c` is the last trade price if a
+  trade printed in the current trading day, else the reference price (after a roll, the official close; so
+  the first trade of the day is collared around the reference). `c` is taken when the incoming order starts
+  matching, so one order cannot walk the price past the collar. No centre: no collar. The static band still applies.
+- Continuous matching (NewOrder or a replace that crosses) stops before a print outside the collar; fills
+  already done stand. The symbol then goes CONTINUOUS->AUCTION_CALL (`VOLATILITY_INTERRUPTION`) for
+  `volatilityAuctionNs` of cluster time (a matcher-owned timer). Remainder of the triggering order:
+  LIMIT DAY rests (joins the auction), IOC is canceled (`IOC_REMAINDER`), MARKET is canceled (`MARKET_COLLAR`).
+  Self-trade prevention is checked after the collar, so a stop at the collar wins.
+- Order of events on a trigger: fills, remainder cancel, deltas, `SymbolStateChanged`, indicative `AuctionUpdate`.
+- Timer end: AUCTION_CALL->CONTINUOUS (`VOLATILITY_AUCTION_END`) with the uncross. If the uncross traded,
+  the static band re-centres on the uncross price. Event order: uncross trades and reports, deltas,
+  `AuctionUpdate(isFinal=TRUE)`, `ReferencePriceApplied` (nbb null, `sourceTsNs` = max(last applied, cluster
+  time)), then `SymbolStateChanged`.
+- Any other transition ends the volatility auction and cancels its timer (a late or replayed firing does nothing):
+  - explicit `CONTINUOUS`: ends it early, uncross, re-centre if it traded (cause `COMMAND`);
+  - `AUCTION_CALL` (immediate or scheduled, e.g. the closing auction, single symbol or market-wide): takes it
+    over; `SymbolStateChanged` AUCTION_CALL->AUCTION_CALL, indicative republished; it is then an ordinary
+    auction (a second AUCTION_CALL is rejected) and no timer reopens the symbol;
+  - `HALTED`: ends it without uncross; a later resume uncrosses a crossed book but does not re-centre;
+  - `CLOSED`: uncrosses (like any AUCTION_CALL->CLOSED), so if that traded the close source is `AUCTION`; no re-centre;
+  - `DayRollover`: orders expire, close (usually `LAST_TRADE`), ->PRE_OPEN (`DAY_ROLLOVER`), next reference.
+- Opening and closing auctions and other uncrosses are never collared and never re-centre the band; their
+  print counts as a trade of the day, so it centres the collar.
 
 Risk (per firm, per shard; limits arrive as `RiskLimitUpdate`)
 - `creditUsed = notional of the firm's open orders (both sides) + |net traded notional today|`.
@@ -136,6 +175,7 @@ Risk (per firm, per shard; limits arrive as `RiskLimitUpdate`)
   (market orders are valued at the band edge they could reach).
 - Position: per symbol, reject with `POSITION_LIMIT` if the worst-case position after the order
   (`net position +- open quantity on that side +- order quantity`) would exceed `maxPositionPerSymbol` in absolute value.
+  The net position carries over `DayRollover`, so the limit applies to the carried position.
 - A budget below current usage is accepted; it only blocks new orders. `enabled = FALSE` is a kill
   switch: new orders rejected with `FIRM_DISABLED`, cancels still work.
 - `RiskLimitApplied` echoes the limits and `creditUsed` at that instant.
@@ -146,9 +186,32 @@ Other commands
   number of orders canceled for FIRM/SESSION/FIRM_SYMBOL scopes (per-firm order list).
 - `ReferencePrice`: ignored unless `sourceTsNs` is newer than the last applied for the symbol
   (two consolidators submit the same updates). Applied: `ReferencePriceApplied` with the new band.
+  A roll's close and a volatility re-centre count as applied at max(last applied, cluster time), so a
+  `ReferencePrice` must be newer than that. Reference timestamps are therefore compared across clock
+  domains (external `sourceTsNs` vs cluster time); accepted because there is no external reference feed any more.
 - `SymbolDefinition`: creates the symbol (books empty, `initialState`) or updates its parameters; `SymbolDefined`.
-- `DayRollover`: expires every order, clears dedupe and intraday risk usage and positions, sets
-  every symbol to `PRE_OPEN`; `DayRolled`.
+  Its `referencePrice` is taken on creation, and on update only while nothing else (ReferencePrice, close,
+  re-centre) has set the reference. When the definition is applied and creates the symbol with a reference,
+  or changes the reference or the band (`priceBandBps`, tick), `ReferencePriceApplied` follows `SymbolDefined`
+  (nbb null, `sourceTsNs` = the symbol's last applied reference timestamp, `Long.MIN_VALUE` while only
+  definitions have set it), so market data always knows the band.
+- `DayRollover`: expires every order, clears dedupe and intraday risk usage (open notional, traded notional;
+  net positions carry over), closes the trading day, sets every symbol to `PRE_OPEN`; `DayRolled`.
+
+Day cycle and official close
+- `ClosingPrice(price, previousClose, tradingDate, source)` is emitted when a symbol enters CLOSED (after the
+  expiries and deltas) and, at `DayRollover`, for a symbol whose close is not current (it never closed that
+  day, or traded after closing). `tradingDate` is the day being closed (last applied roll, 0 before the first).
+- Rule: `AUCTION` if the AUCTION_CALL->CLOSED uncross traded; else the current close repeated if the symbol
+  already closed today and has not traded since; else `LAST_TRADE` if a trade (continuous or auction)
+  printed today; else `PREVIOUS_CLOSE`; else `NONE` (price null).
+- The last `ClosingPrice` before `DayRolled` is the official close. It becomes the previous close and, if not
+  null, the next day's reference price: `ReferencePriceApplied` (nbb null, band recomputed, `sourceTsNs` =
+  max(last applied, roll cluster time)). Stale rule: a later `ReferencePrice` with `sourceTsNs` at or before
+  that is ignored, and a later `SymbolDefinition` does not override it.
+- DayRollover event order: expiries, deltas, then per non-removed symbol in definition order
+  [`ClosingPrice`] [`SymbolStateChanged` ->PRE_OPEN, cause `DAY_ROLLOVER`, if not already PRE_OPEN]
+  [`ReferencePriceApplied` if the close is a price], then `DayRolled`.
 - Malformed or unknown template: `CommandRejected(MALFORMED)`.
 
 Engineering requirements
@@ -203,8 +266,8 @@ All services are plain `main` classes on the shared classpath. Common convention
 | DR backup | `io.lmb.cluster.ClusterBackupMain` | 0 / 1 per shard |
 | Order gateway | `io.lmb.gateway.GatewayMain` | 2 / N |
 | Market data publisher | `io.lmb.marketdata.MarketDataPublisherMain` | 2 (A and B) / 2 |
-| Feed simulator | `io.lmb.feeds.FeedSimulatorMain` | 1 / 0 (replaced by a ticker plant adapter) |
-| NBBO consolidator | `io.lmb.feeds.ConsolidatorMain` | 2 / 2 |
+| Feed simulator (optional, legacy) | `io.lmb.feeds.FeedSimulatorMain` | 0 (`--with-feedsim`: 1) / 0 |
+| NBBO consolidator (optional, legacy) | `io.lmb.feeds.ConsolidatorMain` | 0 (`--consolidators N`) / 0 |
 | Control plane | `io.lmb.controlplane.ControlPlaneMain` | 2 / 2 |
 | Post-trade | `io.lmb.posttrade.PostTradeMain` | 1 / 2 |
 | Shadow replayer | `io.lmb.replayer.ShadowReplayerMain` | 1 per shard / 1 per shard |
@@ -231,8 +294,17 @@ All services are plain `main` classes on the shared classpath. Common convention
   feeds A and B with per-symbol sequence numbers; periodic snapshots carrying the sequence of the
   last applied incremental; TCP retransmission of missed sequences; gRPC `MarketData.Subscribe` with conflation.
 - Its own SBE schema lives inside the module. Ships a client library that arbitrates A/B, detects gaps and recovers.
+- Day cycle content: `SymbolStatus.cause` (COMMAND, VOLATILITY_INTERRUPTION, VOLATILITY_AUCTION_END,
+  DAY_ROLLOVER); `ReferencePrice` (id 6, from `ReferencePriceApplied`: reference price and the static band in
+  force, published from the listing on); `ClosingPrice` (id 7: price, previous close, trading date, source);
+  snapshots and gRPC `BookSnapshot` carry the reference, band, last close and state cause for late joiners.
+- Restart checkpoint `state.bin`. Details: docs/modules/marketdata.md.
 
-### 5.3 Feeds and NBBO
+### 5.3 Feeds and NBBO (optional, legacy)
+- Not needed to run the venue: reference prices come from the venue's own official close (section 3.1) and
+  the volatility auction uncross. The local profile runs no consolidator (`lmb.consolidators=0`) and no feed
+  simulator; `scripts/local-up.sh --consolidators N --with-feedsim` starts them (external-market mode). When
+  they run, their `ReferencePrice` commands still move the reference and band.
 - `VenueFeedHandler` SPI (A/B line arbitration, gap detection, normalisation, receive timestamps);
   a simulated multi-venue feed over UDP for local use and tests.
 - Consolidator: best bid and offer across non-stale venues (a venue silent or lagging beyond
@@ -241,14 +313,26 @@ All services are plain `main` classes on the shared classpath. Common convention
 
 ### 5.4 Control plane
 - PostgreSQL in production, H2 (PostgreSQL mode) for the local profile and tests (`lmb.db.url`).
-- Bootstraps symbols and firms from the CSV files; pushes `SymbolDefinition` and `RiskLimitUpdate`
-  to the shards and reconciles from the event stream.
-- Admin REST (Javalin): halt/resume/auction per symbol or market-wide, kill switch, limits, day roll, status.
+- Bootstraps symbols and firms from the CSV files into an empty database (afterwards the database is
+  the source of truth); pushes `SymbolDefinition` (including `dynamicBandBps`, `volatilityAuctionNs`)
+  and `RiskLimitUpdate` to the shards and reconciles from the event stream.
+- Admin REST (Javalin): symbols (POST/PUT/DELETE), halt/resume/auction per symbol or market-wide,
+  kill switch, limits, day roll, calendar overrides, status. Writes are audited.
 - Scheduler: trading calendar (pre-open, opening auction, continuous, closing auction, close) sent as
   `SymbolStateCommand` with `effectiveTimeNs`, so transitions are cluster timers.
+- Volatility auctions belong to the venue: the calendar never sends CONTINUOUS to a symbol in one;
+  an AUCTION_CALL target (closing auction, operator auction) is sent as a takeover; admin
+  AUCTION_STOP / RESUME_SYMBOL are rejected during one unless `force=true`; RESUME_MARKET goes out
+  per symbol and skips symbols in a volatility auction.
+- Reference prices: the listing price is only the initial reference. Once the venue applies its own
+  (`ReferencePriceApplied`), the control plane records it and the band and stops comparing or pushing
+  the listing price. It stores each `ClosingPrice` (price, previous close, source, trading date).
 - Risk-budget allocator: splits each firm's credit limit into per-shard budgets, rebalances from
-  `RiskLimitApplied` usage; the sum of budgets never exceeds the firm limit.
-- Two instances; only the holder of a database lock runs the scheduler and allocator.
+  `RiskLimitApplied` usage; the sum of budgets never exceeds the firm limit. The deployment firms use
+  1e16 cents, which never binds and keeps every long sum (at most shards x firms x limit) more than 10x
+  below overflow at 16 shards and up to 5 firms.
+- Two instances; only the holder of the database leader lease sends commands. Details:
+  docs/modules/controlplane.md.
 
 ### 5.5 Post-trade, replayer, tools
 - Post-trade sinks are independent event stream consumers with persisted cursors: FIX drop copy

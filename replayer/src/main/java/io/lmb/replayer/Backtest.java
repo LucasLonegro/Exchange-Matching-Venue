@@ -361,7 +361,7 @@ public final class Backtest
         {
             for (final String n : new String[] { "ExecutionReport", "Trade", "BookDelta", "SymbolStateChanged",
                 "AuctionUpdate", "ReferencePriceApplied", "MassCancelDone", "RiskLimitApplied", "SymbolDefined",
-                "CommandRejected", "DayRolled", "CommandApplied" })
+                "CommandRejected", "DayRolled", "ClosingPrice", "CommandApplied" })
             {
                 try
                 {

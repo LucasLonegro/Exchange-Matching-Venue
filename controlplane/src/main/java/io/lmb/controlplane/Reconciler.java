@@ -95,8 +95,9 @@ public final class Reconciler implements Engine.Duty
     public static boolean matches(final ShardState.Symbol obs, final Store.SymbolRow r)
     {
         return obs.state != SymbolState.REMOVED && obs.ticker.equals(r.ticker()) && obs.tickSize == r.tickSize() &&
-            obs.lotSize == r.lotSize() && obs.referencePrice == r.referencePrice() && obs.priceBandBps == r.priceBandBps() &&
-            obs.maxOrderQty == r.maxOrderQty();
+            obs.lotSize == r.lotSize() && (obs.venueReference || obs.referencePrice == r.referencePrice()) &&
+            obs.priceBandBps == r.priceBandBps() && obs.maxOrderQty == r.maxOrderQty() &&
+            obs.dynamicBandBps == r.dynamicBandBps() && obs.volatilityAuctionNs == r.volatilityAuctionNs();
     }
 
     static TrackedCommand define(final Engine engine, final int shardId, final Store.SymbolRow r, final Long auditId)
@@ -104,7 +105,7 @@ public final class Reconciler implements Engine.Duty
         final TrackedCommand c = engine.issue(shardId, Kind.SYMBOL_DEFINITION, "def:" + shardId + ":" + r.symbolId(), "RECONCILE",
             "define " + r.ticker() + " (" + r.symbolId() + ") on shard " + shardId, 0, auditId,
             corr -> Commands.symbolDefinition(corr, r.symbolId(), r.ticker(), r.tickSize(), r.lotSize(), r.referencePrice(),
-                r.priceBandBps(), r.maxOrderQty(), SymbolState.PRE_OPEN));
+                r.priceBandBps(), r.maxOrderQty(), r.dynamicBandBps(), r.volatilityAuctionNs(), SymbolState.PRE_OPEN));
         c.symbolId = r.symbolId();
         return c;
     }

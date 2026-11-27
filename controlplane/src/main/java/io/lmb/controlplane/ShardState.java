@@ -22,6 +22,22 @@ public final class ShardState
         public SymbolState state;
         public long lastCorrelationId;
         public long eventSeq;
+        // band-stp
+        public int dynamicBandBps;
+        public long volatilityAuctionNs;
+        /** In a matcher-initiated volatility auction: AUCTION_CALL entered with cause VOLATILITY_INTERRUPTION. */
+        public boolean volatilityAuction;
+        /** Cluster time the running volatility auction started, 0 if none. */
+        public long volatilityAuctionSinceNs;
+        /** The venue owns {@link #referencePrice}: it applied a reference of its own since the definition. */
+        public boolean venueReference;
+        public long bandLow = Long.MIN_VALUE;
+        public long bandHigh = Long.MIN_VALUE;
+        // day-cycle: last ClosingPrice (closeSource null = none seen)
+        public long closePrice = Long.MIN_VALUE;
+        public long previousClose = Long.MIN_VALUE;
+        public String closeSource;
+        public int closeTradingDate;
     }
 
     public static final class Firm

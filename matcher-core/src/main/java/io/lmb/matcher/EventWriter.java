@@ -6,6 +6,8 @@ import io.lmb.sbe.AuctionUpdateEncoder;
 import io.lmb.sbe.BookDeltaEncoder;
 import io.lmb.sbe.BooleanType;
 import io.lmb.sbe.CancelReason;
+import io.lmb.sbe.ClosePriceSource;
+import io.lmb.sbe.ClosingPriceEncoder;
 import io.lmb.sbe.CommandAppliedEncoder;
 import io.lmb.sbe.CommandRejectedEncoder;
 import io.lmb.sbe.DayRolledEncoder;
@@ -22,6 +24,7 @@ import io.lmb.sbe.ReferencePriceAppliedEncoder;
 import io.lmb.sbe.RejectReason;
 import io.lmb.sbe.RiskLimitAppliedEncoder;
 import io.lmb.sbe.Side;
+import io.lmb.sbe.StateChangeCause;
 import io.lmb.sbe.SymbolDefinedEncoder;
 import io.lmb.sbe.SymbolState;
 import io.lmb.sbe.SymbolStateChangedEncoder;
@@ -52,6 +55,7 @@ final class EventWriter
     private final SymbolDefinedEncoder symbolDefined = new SymbolDefinedEncoder();
     private final CommandRejectedEncoder rejected = new CommandRejectedEncoder();
     private final DayRolledEncoder dayRolled = new DayRolledEncoder();
+    private final ClosingPriceEncoder closingPrice = new ClosingPriceEncoder();
     private final CommandAppliedEncoder applied = new CommandAppliedEncoder();
 
     final HashChain chain = new HashChain();
@@ -82,6 +86,12 @@ final class EventWriter
     void hashTimer(final long correlationId)
     {
         chain.updateLong(correlationId);
+    }
+
+    /** Cluster time of the log entry being applied. */
+    long timestampNs()
+    {
+        return timestampNs;
     }
 
     int eventIdx()
@@ -179,7 +189,9 @@ final class EventWriter
         return SymbolState.get(code);
     }
 
-    void symbolStateChanged(final long correlationId, final int symbolId, final int reasonCode, final byte prev, final byte next)
+    void symbolStateChanged(
+        final long correlationId, final int symbolId, final int reasonCode, final byte prev, final byte next,
+        final StateChangeCause cause)
     {
         stateChanged.wrapAndApplyHeader(buf, 0, header);
         eventHeader(stateChanged.eventHeader());
@@ -187,7 +199,8 @@ final class EventWriter
             .symbolId(symbolId & 0xFFFF_FFFFL)
             .reasonCode(reasonCode)
             .previousState(state(prev))
-            .newState(state(next));
+            .newState(state(next))
+            .cause(cause); // band-stp
         publish(HDR + SymbolStateChangedEncoder.BLOCK_LENGTH);
     }
 
@@ -264,7 +277,9 @@ final class EventWriter
             .symbolId(s.symbolId & 0xFFFF_FFFFL)
             .priceBandBps(s.bandBps)
             .putTicker(s.ticker, 0)
-            .state(state(s.state));
+            .state(state(s.state))
+            .volatilityAuctionNs(s.volatilityAuctionNs) // band-stp
+            .dynamicBandBps(s.dynamicBandBps);
         publish(HDR + SymbolDefinedEncoder.BLOCK_LENGTH);
     }
 
@@ -285,6 +300,18 @@ final class EventWriter
     }
 
     /** Ends the log entry: CommandApplied with the new chain hash. Not itself hashed. */
+    void closingPrice(final Symbol s, final int tradingDate)
+    {
+        closingPrice.wrapAndApplyHeader(buf, 0, header);
+        eventHeader(closingPrice.eventHeader());
+        closingPrice.price(s.closePx)
+            .previousClose(s.prevClosePx)
+            .symbolId(s.symbolId & 0xFFFF_FFFFL)
+            .tradingDate(tradingDate)
+            .source(ClosePriceSource.get(s.closeSource));
+        publish(HDR + ClosingPriceEncoder.BLOCK_LENGTH);
+    }
+
     void commandApplied(final int templateId)
     {
         final int count = eventIdx;

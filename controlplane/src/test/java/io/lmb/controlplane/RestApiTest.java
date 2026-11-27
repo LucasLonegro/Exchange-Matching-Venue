@@ -142,6 +142,7 @@ class RestApiTest
         assertEquals(500, s0.symbol(9).band);
         assertEquals(422, call("POST", "/api/symbols", "{\"symbolId\":9,\"ticker\":\"IBM\",\"shard\":1,\"tickSize\":1,\"lotSize\":1," +
             "\"referencePrice\":15000,\"priceBandBps\":500,\"maxOrderQty\":1000}", TOKEN).statusCode(), "cannot move shards");
+        dynamicCollar();
         write("DELETE", "/api/symbols/9", null, 200);
         assertEquals(SymbolState.REMOVED, s0.state(9));
         assertEquals(422, call("POST", "/api/symbols/9/halt", null, TOKEN).statusCode(), "removed symbol");
@@ -176,6 +177,90 @@ class RestApiTest
             .build(), HttpResponse.BodyHandlers.ofString());
         assertTrue(metrics.body().contains("lmb_controlplane_is_leader 1"));
         assertTrue(metrics.body().contains("lmb_controlplane_admin_requests_total"));
+    }
+
+    /** Symbol 9 (shard 0) exists without dynamic-collar fields: the defaults, then POST/PUT validation and the GET view. */
+    private void dynamicCollar() throws Exception
+    {
+        final String body = "\"ticker\":\"IBM\",\"shard\":0,\"tickSize\":1,\"lotSize\":1,\"referencePrice\":15000," +
+            "\"priceBandBps\":500,\"maxOrderQty\":1000";
+        final String post = "{\"symbolId\":9," + body;
+        Map<?, ?> g = (Map<?, ?>)Json.parse(get("/api/symbols/9"));
+        assertEquals(0L, num(g, "dynamicBandBps"), "CSV default");
+        assertEquals(300_000_000_000L, num(g, "volatilityAuctionNs"), "CSV default");
+        assertEquals(0, s0.symbol(9).dyn);
+        assertEquals(300_000_000_000L, s0.symbol(9).vol);
+
+        // range checks on POST and PUT
+        for (final String bad : List.of(",\"dynamicBandBps\":10001}", ",\"dynamicBandBps\":-1}", ",\"dynamicBandBps\":1.5}",
+            ",\"dynamicBandBps\":\"x\"}", ",\"volatilityAuctionNs\":86400000000001}", ",\"volatilityAuctionNs\":-1}",
+            ",\"dynamicBandBps\":100,\"volatilityAuctionNs\":0}"))
+        {
+            assertEquals(400, call("POST", "/api/symbols", post + bad, TOKEN).statusCode(), "POST " + bad);
+            assertEquals(400, call("PUT", "/api/symbols/9", "{" + body + bad, TOKEN).statusCode(), "PUT " + bad);
+        }
+        assertEquals(400, call("PUT", "/api/symbols/9", "{\"symbolId\":8," + body + "}", TOKEN).statusCode(), "path/body id mismatch");
+        assertEquals(0, s0.symbol(9).dyn, "rejected writes change nothing");
+
+        // POST both, then PUT one at a time: the absent field keeps the stored value
+        write("POST", "/api/symbols", post + ",\"dynamicBandBps\":200,\"volatilityAuctionNs\":120000000000}", 200);
+        assertTrue(await(() -> s0.symbol(9).dyn == 200 && s0.symbol(9).vol == 120_000_000_000L));
+        write("PUT", "/api/symbols/9", "{" + body + ",\"dynamicBandBps\":300}", 200);
+        assertTrue(await(() -> s0.symbol(9).dyn == 300 && s0.symbol(9).vol == 120_000_000_000L));
+        write("PUT", "/api/symbols/9", "{\"symbolId\":9," + body + ",\"volatilityAuctionNs\":60000000000}", 200);
+        assertTrue(await(() -> s0.symbol(9).dyn == 300 && s0.symbol(9).vol == 60_000_000_000L));
+        assertEquals(400, call("PUT", "/api/symbols/9", "{" + body + ",\"volatilityAuctionNs\":0}", TOKEN).statusCode(),
+            "the kept dynamicBandBps (300) needs a volatility auction");
+        write("PUT", "/api/symbols/9", "{" + body + ",\"dynamicBandBps\":10000,\"volatilityAuctionNs\":86400000000000}", 200);
+        assertTrue(await(() -> s0.symbol(9).dyn == 10_000 && s0.symbol(9).vol == 86_400_000_000_000L), "upper bounds");
+        write("PUT", "/api/symbols/9", "{" + body + ",\"dynamicBandBps\":0,\"volatilityAuctionNs\":0}", 200);
+        assertTrue(await(() -> s0.symbol(9).dyn == 0 && s0.symbol(9).vol == 0), "collar off");
+        write("PUT", "/api/symbols/9", "{" + body + ",\"dynamicBandBps\":250,\"volatilityAuctionNs\":3600000000000}", 200);
+        assertTrue(await(() -> s0.symbol(9).dyn == 250 && s0.symbol(9).vol == 3_600_000_000_000L));
+        write("PUT", "/api/symbols/9", "{" + body + "}", 200);
+        assertEquals(250, s0.symbol(9).dyn, "both absent: both kept");
+        assertEquals(3_600_000_000_000L, s0.symbol(9).vol);
+
+        g = (Map<?, ?>)Json.parse(get("/api/symbols/9"));
+        assertEquals(250L, num(g, "dynamicBandBps"));
+        assertEquals(3_600_000_000_000L, num(g, "volatilityAuctionNs"));
+        assertEquals(15_000L, num(g, "referencePrice"));
+        assertEquals(Boolean.FALSE, g.get("inVolatilityAuction"));
+        assertEquals(null, g.get("volatilityAuctionSinceNs"));
+        assertEquals(null, g.get("venueReferencePrice"));
+        assertEquals(null, g.get("lastClose"));
+
+        // venue-side state: own reference, a volatility auction, then a forced close at a last trade
+        assertTrue(await(() -> s0.state(9) == SymbolState.CONTINUOUS));
+        s0.reference(9, venue.nowNs(), 15_100);
+        assertTrue(await(() -> get("/api/symbols/9").contains("\"venueReferencePrice\":15100")));
+        g = (Map<?, ?>)Json.parse(get("/api/symbols/9"));
+        assertEquals(15_000L, num(g, "referencePrice"), "listing price stays the DB value");
+        assertEquals(14_345L, num(g, "bandLow"));
+        assertEquals(15_855L, num(g, "bandHigh"));
+        s0.interrupt(9, venue.nowNs(), Long.MIN_VALUE);
+        assertTrue(await(() -> get("/api/symbols/9").contains("\"inVolatilityAuction\":true")));
+        assertTrue(((Map<?, ?>)Json.parse(get("/api/symbols/9"))).get("volatilityAuctionSinceNs") instanceof Number);
+        assertEquals(400, call("POST", "/api/symbols/9/auction/stop?target=OPEN", null, TOKEN).statusCode());
+        assertEquals(422, call("POST", "/api/symbols/9/auction/stop?target=CLOSED", null, TOKEN).statusCode(),
+            "volatility auction needs force");
+        assertTrue(s0.inVolatilityAuction(9));
+        s0.trade(9, 15_050);
+        write("POST", "/api/symbols/9/auction/stop?target=CLOSED&force=true", null, 200);
+        assertFalse(s0.inVolatilityAuction(9)); // CLOSED is transient: with no operator hold enforcement reopens it
+        assertTrue(await(() -> get("/api/symbols/9").contains("\"source\":\"LAST_TRADE\"")));
+        g = (Map<?, ?>)Json.parse(get("/api/symbols/9"));
+        assertEquals(Boolean.FALSE, g.get("inVolatilityAuction"));
+        assertEquals(null, g.get("volatilityAuctionSinceNs"));
+        final Map<?, ?> close = (Map<?, ?>)g.get("lastClose");
+        assertEquals(15_050L, num(close, "price"));
+        assertEquals(null, close.get("previousClose"));
+        assertEquals(20261117L, num(close, "tradingDate"));
+    }
+
+    private static long num(final Map<?, ?> m, final String key)
+    {
+        return ((Number)m.get(key)).longValue();
     }
 
     private Map<?, ?> write(final String method, final String path, final String body, final int expected) throws Exception

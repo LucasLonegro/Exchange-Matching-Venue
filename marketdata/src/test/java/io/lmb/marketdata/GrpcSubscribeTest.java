@@ -207,6 +207,83 @@ class GrpcSubscribeTest
     }
 
     @Test
+    void referenceCloseAndCauseReachLiveAndLateSubscribers() throws Exception
+    {
+        final int vol = DayCycleMdTest.VOL;
+        final VenueDriver v = TestSupport.venueWithSymbols(1);
+        final MarketDataPublisher p = publisher(v, 100_000);
+        awaitConsumed(p, v);
+        final Client live = new Client(0);
+        stub(p, 0).subscribe(SubscribeRequest.newBuilder().build(), live);
+        TestSupport.await("2 snapshots", 5_000, () -> live.count(MarketDataUpdate::hasSnapshot) == 2);
+        synchronized (live)
+        {
+            final io.lmb.proto.marketdata.BookSnapshot s = live.updates.get(0).getSnapshot();
+            assertEquals("", s.getStateCause(), "no SymbolStatus yet");
+            assertEquals(10_000, s.getReference().getReferencePriceCents());
+            assertTrue(s.getReference().getHasBand(), "the listing applied the band");
+            assertFalse(s.hasLastClose());
+        }
+
+        v.volatilityThenRollovers(0, vol, DayCycleMdTest.DAY1);
+        awaitConsumed(p, v);
+        final long finalSeq = p.engine().builder().symbol(vol).seq();
+        TestSupport.await("md_seq " + finalSeq, 5_000, () -> live.seq(vol) == finalSeq);
+        final List<MarketDataUpdate> u;
+        synchronized (live)
+        {
+            u = live.updates.stream().filter(x -> x.getSymbolId() == vol).toList();
+        }
+        final List<String> causes = u.stream().filter(MarketDataUpdate::hasStatus).map(x -> x.getStatus().getCause()).toList();
+        assertEquals(List.of("VOLATILITY_INTERRUPTION", "VOLATILITY_AUCTION_END", "DAY_ROLLOVER"), causes);
+        final List<io.lmb.proto.marketdata.ReferencePrice> refs = u.stream().filter(MarketDataUpdate::hasReference)
+            .map(MarketDataUpdate::getReference).toList();
+        assertEquals(4, refs.size(), "listing + auction end + two rollovers");
+        assertEquals(10_000, refs.get(0).getReferencePriceCents());
+        assertTrue(refs.get(0).getHasBand());
+        for (final io.lmb.proto.marketdata.ReferencePrice r : refs.subList(1, refs.size()))
+        {
+            assertTrue(r.getHasReferencePrice() && r.getHasBand());
+            assertEquals(VenueDriver.VOL_PRICE, r.getReferencePriceCents());
+            assertTrue(r.getBandLowCents() < VenueDriver.VOL_PRICE && VenueDriver.VOL_PRICE < r.getBandHighCents());
+        }
+        final List<io.lmb.proto.marketdata.ClosingPrice> closes = u.stream().filter(MarketDataUpdate::hasClose)
+            .map(MarketDataUpdate::getClose).toList();
+        assertEquals(2, closes.size());
+        assertEquals("LAST_TRADE", closes.get(0).getSource());
+        assertTrue(closes.get(0).getHasPrice() && !closes.get(0).getHasPreviousClose());
+        assertEquals(0, closes.get(0).getTradingDate());
+        assertEquals("PREVIOUS_CLOSE", closes.get(1).getSource());
+        assertEquals(VenueDriver.VOL_PRICE, closes.get(1).getPreviousCloseCents());
+        assertEquals(DayCycleMdTest.DAY1, closes.get(1).getTradingDate());
+        // the first close comes before the reference price it sets
+        int firstClose = -1;
+        int lastReference = -1;
+        for (int i = 0; i < u.size(); i++)
+        {
+            firstClose = firstClose < 0 && u.get(i).hasClose() ? i : firstClose;
+            lastReference = u.get(i).hasReference() ? i : lastReference;
+        }
+        assertTrue(firstClose > 0 && lastReference > firstClose, firstClose + " " + lastReference);
+        assertNull(live.violation, live.violation);
+
+        final Client late = new Client(0);
+        stub(p, 0).subscribe(SubscribeRequest.newBuilder().addSymbols("VOL" + vol).build(), late);
+        TestSupport.await("late snapshot", 5_000, () -> late.count(MarketDataUpdate::hasSnapshot) == 1);
+        synchronized (late)
+        {
+            final MarketDataUpdate su = late.updates.get(0);
+            assertEquals(finalSeq, su.getMdSeq());
+            final io.lmb.proto.marketdata.BookSnapshot s = su.getSnapshot();
+            assertEquals("PRE_OPEN", s.getState());
+            assertEquals("DAY_ROLLOVER", s.getStateCause());
+            assertEquals(refs.get(3), s.getReference());
+            assertEquals(closes.get(1), s.getLastClose());
+        }
+        assertNull(late.error);
+    }
+
+    @Test
     void depthLimitedSubscriberHoldsExactlyTheTopLevels() throws Exception
     {
         final VenueDriver v = TestSupport.venueWithSymbols(1);

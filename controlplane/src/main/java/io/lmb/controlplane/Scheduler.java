@@ -82,7 +82,7 @@ public final class Scheduler implements Engine.Duty
                 {
                     continue;
                 }
-                final SymbolState hop = SymbolStates.desiredHop(obs.state, target, r.operatorState());
+                final SymbolState hop = SymbolStates.desiredHop(obs.state, obs.volatilityAuction, target, r.operatorState());
                 if (hop == null)
                 {
                     continue;

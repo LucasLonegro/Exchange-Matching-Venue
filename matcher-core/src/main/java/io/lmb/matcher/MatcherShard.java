@@ -18,6 +18,7 @@ import io.lmb.sbe.ReferencePriceDecoder;
 import io.lmb.sbe.RejectReason;
 import io.lmb.sbe.ReplaceOrderDecoder;
 import io.lmb.sbe.RiskLimitUpdateDecoder;
+import io.lmb.sbe.StateChangeCause;
 import io.lmb.sbe.SymbolDefinitionDecoder;
 import io.lmb.sbe.SymbolStateCommandDecoder;
 import org.agrona.DirectBuffer;
@@ -61,6 +62,14 @@ public final class MatcherShard implements ShardStateMachine
     static final int DONE_CANCELED = -3;
     static final int DONE_EXPIRED = -4;
 
+    // band-stp: why matchAggressor stopped before the aggressor was filled or reached its limit
+    private static final byte STOP_NONE = 0;
+    private static final byte STOP_SELF_TRADE = 1;
+    private static final byte STOP_VOLATILITY = 2;
+    /** Longest volatility auction accepted: one day. */
+    private static final long MAX_VOLATILITY_AUCTION_NS = 86_400_000_000_000L;
+    // /band-stp
+
     private static final int PRICE_BITS = 43;
     private static final long PRICE_MASK = (1L << PRICE_BITS) - 1;
 
@@ -96,6 +105,8 @@ public final class MatcherShard implements ShardStateMachine
     final Long2LongHashMap orderById = new Long2LongHashMap(-1L);
     final OrderList allOrders = new OrderList(Order.L_GLOBAL);
     final ArrayList<PendingTransition> pending = new ArrayList<>();
+    /** band-stp: running volatility auction timers, timerId -> symbol index (derived from Symbol.volTimerId, not snapshotted). */
+    final Long2LongHashMap volTimers = new Long2LongHashMap(-1L);
     long orderSeq;
     long matchSeq;
     long timerSeq;
@@ -112,6 +123,7 @@ public final class MatcherShard implements ShardStateMachine
     private long aMatched;
     private long aImbalance;
     private byte aSide;
+    private byte matchStop = STOP_NONE;
 
     // ---- snapshot load ----
     private SnapshotCodec.Loader loader;
@@ -209,6 +221,10 @@ public final class MatcherShard implements ShardStateMachine
             {
                 applyStateCommand(p.symbolId, p.targetState, p.correlationId, p.reasonCode);
             }
+            else
+            {
+                onVolatilityTimer(correlationId);
+            }
             flushBook(false);
         }
         catch (final RuntimeException ex)
@@ -226,6 +242,7 @@ public final class MatcherShard implements ShardStateMachine
             dirty[i].dirty = false;
         }
         dirtyCount = 0;
+        matchStop = STOP_NONE;
         LOG.error("internal error applying template {} at log position {}", templateId, logPosition, ex);
     }
 
@@ -317,7 +334,7 @@ public final class MatcherShard implements ShardStateMachine
                 if (wellFormed(b, off, len, DayRolloverDecoder.BLOCK_LENGTH))
                 {
                     dayRollDecoder.wrap(b, off + HDR, blockLength(b, off), 0);
-                    onDayRollover(dayRollDecoder);
+                    onDayRollover(dayRollDecoder, now);
                     return;
                 }
                 break;
@@ -569,7 +586,10 @@ public final class MatcherShard implements ShardStateMachine
         {
             matchAggressor(o, gwTs);
         }
-        finishAggressor(o, gwTs);
+        if (finishAggressor(o, gwTs))
+        {
+            startVolatilityAuction(sym);
+        }
         flushBook(true);
     }
 
@@ -586,12 +606,25 @@ public final class MatcherShard implements ShardStateMachine
         return net - open - qty < -max;
     }
 
-    /** After matching: rest a DAY limit remainder, cancel an IOC/market remainder, or retire if filled. */
-    private void finishAggressor(final Order o, final long gwTs)
+    /**
+     * After matching: rest a DAY limit remainder, cancel an IOC/market remainder, or retire if filled.
+     * A remainder stopped by self-trade prevention is canceled ({@code SELF_TRADE}) whatever its type.
+     *
+     * @return true if matching stopped at the dynamic collar (the caller starts the volatility auction)
+     */
+    private boolean finishAggressor(final Order o, final long gwTs)
     {
+        final byte stop = matchStop;
+        matchStop = STOP_NONE;
         if (o.leaves() == 0)
         {
             retire(o, DONE_FILLED);
+        }
+        else if (stop == STOP_SELF_TRADE)
+        {
+            releaseRisk(o);
+            emitOrder(o, ExecType.CANCELED, OrdStatus.CANCELED, o.clOrdId, 0, gwTs, CancelReason.SELF_TRADE, 0);
+            retire(o, DONE_CANCELED);
         }
         else if (o.ordType == Codes.LIMIT && o.tif == Codes.DAY)
         {
@@ -608,6 +641,7 @@ public final class MatcherShard implements ShardStateMachine
             emitOrder(o, ExecType.CANCELED, OrdStatus.CANCELED, o.clOrdId, 0, gwTs, why, 0);
             retire(o, DONE_CANCELED);
         }
+        return stop == STOP_VOLATILITY;
     }
 
     // =====================================================================================
@@ -870,7 +904,10 @@ public final class MatcherShard implements ShardStateMachine
             {
                 matchAggressor(o, gwTs);
             }
-            finishAggressor(o, gwTs);
+            if (finishAggressor(o, gwTs))
+            {
+                startVolatilityAuction(sym);
+            }
         }
         flushBook(true);
     }
@@ -1002,8 +1039,14 @@ public final class MatcherShard implements ShardStateMachine
         final long ref = d.referencePrice();
         final long symbolId = d.symbolId();
         final long bps = d.priceBandBps();
+        final long dynBps = d.dynamicBandBps();
+        final long volNs = d.volatilityAuctionNs();
         RejectReason reason = null;
-        if (tick <= 0 || tick > MAX_PRICE || (ref != NULL_PRICE && (ref <= 0 || ref > MAX_PRICE)))
+        if (volNs < 0 || volNs > MAX_VOLATILITY_AUCTION_NS || (dynBps > 0 && volNs == 0))
+        {
+            reason = RejectReason.MALFORMED;
+        }
+        else if (tick <= 0 || tick > MAX_PRICE || (ref != NULL_PRICE && (ref <= 0 || ref > MAX_PRICE)))
         {
             reason = RejectReason.INVALID_PRICE;
         }
@@ -1040,12 +1083,19 @@ public final class MatcherShard implements ShardStateMachine
             symbols.add(s);
             symbolIdxById.put((int)symbolId, s.idx);
         }
+        // change B: the band before this definition (a fresh symbol has none to compare against)
+        final long oldRef = fresh ? NULL_PRICE : s.refPrice;
+        final long oldBps = s.bandBps;
+        final long oldLow = fresh ? NULL_PRICE : s.bandLow;
+        final long oldHigh = fresh ? NULL_PRICE : s.bandHigh;
         if (fresh)
         {
             s.state = (byte)initRaw;
             s.refPrice = ref;
             s.lastRefSourceTs = Long.MIN_VALUE;
+            s.lastTradePx = NULL_PRICE;
             s.resetAuction();
+            s.resetDayCycle();
             s.bids.clearAll();
             s.asks.clearAll();
             s.bids.indexTick = tick;
@@ -1069,6 +1119,8 @@ public final class MatcherShard implements ShardStateMachine
         s.lotSize = lot;
         s.maxOrderQty = maxQty;
         s.bandBps = bps;
+        s.dynamicBandBps = dynBps;
+        s.volatilityAuctionNs = volNs;
         d.getTicker(s.ticker, 0);
         s.computeBand();
         if (s.refPrice != NULL_PRICE)
@@ -1077,6 +1129,14 @@ public final class MatcherShard implements ShardStateMachine
             s.asks.maybeRecentre(s.refPrice);
         }
         ew.symbolDefined(corr, s);
+        // change B: publish the band whenever the definition set or moved it, so market data always knows it.
+        // sourceTsNs is the symbol's effective reference timestamp (Long.MIN_VALUE while only definitions set it).
+        if (s.refPrice != NULL_PRICE
+            && (fresh || s.refPrice != oldRef || s.bandBps != oldBps || s.bandLow != oldLow || s.bandHigh != oldHigh))
+        {
+            ew.referencePriceApplied(
+                s.refPrice, NULL_PRICE, NULL_PRICE, s.bandLow, s.bandHigh, s.lastRefSourceTs, s.symbolId);
+        }
         if (s.state == AUCTION_CALL)
         {
             maybeEmitIndicative(s);
@@ -1117,9 +1177,9 @@ public final class MatcherShard implements ShardStateMachine
             for (int i = 0; i < symbols.size(); i++)
             {
                 final Symbol s = symbols.get(i);
-                if (s.state != REMOVED && Codes.allowed(s.state, target))
+                if (s.state != REMOVED && allowed(s, target))
                 {
-                    transition(s, target, corr, reasonCode);
+                    transition(s, target, corr, reasonCode, StateChangeCause.COMMAND);
                 }
             }
             return;
@@ -1129,25 +1189,47 @@ public final class MatcherShard implements ShardStateMachine
         {
             ew.commandRejected(corr, SymbolStateCommandDecoder.TEMPLATE_ID, RejectReason.UNKNOWN_SYMBOL);
         }
-        else if (!Codes.allowed(s.state, target))
+        else if (!allowed(s, target))
         {
             ew.commandRejected(corr, SymbolStateCommandDecoder.TEMPLATE_ID, RejectReason.INVALID_STATE_TRANSITION);
         }
         else
         {
-            transition(s, target, corr, reasonCode);
+            transition(s, target, corr, reasonCode, StateChangeCause.COMMAND);
         }
     }
 
-    private void transition(final Symbol s, final byte target, final long corr, final int reasonCode)
+    /**
+     * The transition table, plus (band-stp) AUCTION_CALL -> AUCTION_CALL while a volatility auction runs: a scheduled
+     * auction (e.g. the closing auction) arriving then takes the auction over, so it is not lost and the volatility
+     * timer no longer ends it.
+     */
+    private static boolean allowed(final Symbol s, final byte target)
+    {
+        return Codes.allowed(s.state, target) || (target == AUCTION_CALL && s.inVolatilityAuction());
+    }
+
+    private void transition(
+        final Symbol s, final byte target, final long corr, final int reasonCode, final StateChangeCause cause)
     {
         final byte prev = s.state;
+        final long matchSeqBefore = matchSeq;
+        // band-stp: any transition ends a running volatility auction (its timer is canceled)
+        final boolean volatility = s.inVolatilityAuction();
+        if (volatility)
+        {
+            clearVolatilityTimer(s);
+        }
         if ((prev == AUCTION_CALL && (target == CONTINUOUS || target == CLOSED)) || (target == CONTINUOUS && s.crossed()))
         {
-            uncross(s);
+            final long px = uncross(s);
+            if (volatility && target == CONTINUOUS && px != NULL_PRICE)
+            {
+                recentre(s, px);
+            }
         }
         s.state = target;
-        ew.symbolStateChanged(corr, s.symbolId, reasonCode, prev, target);
+        ew.symbolStateChanged(corr, s.symbolId, reasonCode, prev, target, cause);
         if (target == CLOSED || target == REMOVED)
         {
             final boolean closed = target == CLOSED;
@@ -1162,6 +1244,10 @@ public final class MatcherShard implements ShardStateMachine
             }
             flushBook(false);
             s.resetAuction();
+            if (closed)
+            {
+                closeSymbol(s, prev == AUCTION_CALL && matchSeq != matchSeqBefore);
+            }
         }
         else if (target == AUCTION_CALL)
         {
@@ -1205,7 +1291,7 @@ public final class MatcherShard implements ShardStateMachine
         ew.riskLimitApplied(corr, budget, f.creditUsed(), maxPos, firmId, f.enabled);
     }
 
-    private void onDayRollover(final DayRolloverDecoder d)
+    private void onDayRollover(final DayRolloverDecoder d, final long now)
     {
         final long corr = d.correlationId();
         // Idempotent: a roll that does not advance the trading date (a resend whose first copy was applied
@@ -1216,6 +1302,7 @@ public final class MatcherShard implements ShardStateMachine
             ew.commandRejected(corr, DayRolloverDecoder.TEMPLATE_ID, RejectReason.INVALID_STATE_TRANSITION);
             return;
         }
+        final int closingDate = tradingDate;
         tradingDate = d.tradingDate();
         int expired = 0;
         Order o = allOrders.head;
@@ -1234,25 +1321,173 @@ public final class MatcherShard implements ShardStateMachine
             f.tradedNet = 0;
             f.openNotional = 0;
         }
+        // day-cycle: positions carry over to the next day; only open quantities (all orders expired) reset.
         for (int i = 0; i < firmSymbols.size(); i++)
         {
             final FirmSymbol fs = firmSymbols.get(i);
-            fs.netPosition = 0;
             fs.openBuyQty = 0;
             fs.openSellQty = 0;
         }
         for (int i = 0; i < symbols.size(); i++)
         {
             final Symbol s = symbols.get(i);
-            if (s.state != REMOVED && s.state != PRE_OPEN)
+            if (s.state == REMOVED)
+            {
+                continue;
+            }
+            // day-cycle: a symbol whose close is not current (never closed today, or traded since) closes now
+            if (!s.hasClose)
+            {
+                closeSymbol(s, false, closingDate);
+            }
+            if (s.state != PRE_OPEN)
             {
                 final byte prev = s.state;
+                if (s.inVolatilityAuction())
+                {
+                    clearVolatilityTimer(s);
+                }
                 s.state = PRE_OPEN;
                 s.resetAuction();
-                ew.symbolStateChanged(corr, s.symbolId, 0, prev, PRE_OPEN);
+                ew.symbolStateChanged(corr, s.symbolId, 0, prev, PRE_OPEN, StateChangeCause.DAY_ROLLOVER);
             }
+            rollDayCycle(s, now);
         }
         ew.dayRolled(corr, d.tradingDate(), expired);
+    }
+
+    // =====================================================================================
+    // day-cycle: last trade, official close, next day's reference price
+    // =====================================================================================
+
+    private static void recordTrade(final Symbol s, final long px)
+    {
+        s.lastTradePx = px;
+        s.tradedToday = true;
+        s.hasClose = false;
+    }
+
+    private void closeSymbol(final Symbol s, final boolean auctionTraded)
+    {
+        closeSymbol(s, auctionTraded, tradingDate);
+    }
+
+    /**
+     * Determines the symbol's close for the trading day and emits ClosingPrice. A close that is still current
+     * (determined earlier today, no trade since) is repeated unchanged unless the closing auction just traded.
+     */
+    private void closeSymbol(final Symbol s, final boolean auctionTraded, final int date)
+    {
+        if (auctionTraded)
+        {
+            s.closePx = s.lastTradePx;
+            s.closeSource = Codes.CLOSE_AUCTION;
+        }
+        else if (!s.hasClose)
+        {
+            if (s.tradedToday)
+            {
+                s.closePx = s.lastTradePx;
+                s.closeSource = Codes.CLOSE_LAST_TRADE;
+            }
+            else if (s.prevClosePx != NULL_PRICE)
+            {
+                s.closePx = s.prevClosePx;
+                s.closeSource = Codes.CLOSE_PREVIOUS_CLOSE;
+            }
+            else
+            {
+                s.closePx = NULL_PRICE;
+                s.closeSource = Codes.CLOSE_NONE;
+            }
+        }
+        s.hasClose = true;
+        ew.closingPrice(s, date);
+    }
+
+    /**
+     * Start of a new trading day for one symbol: the close becomes the previous close and, when it is a price,
+     * the reference price. The reference counts as applied with sourceTsNs = max(last applied, roll time), so an
+     * external ReferencePrice observed at or before the roll is ignored as stale and a SymbolDefinition update
+     * no longer overrides it.
+     */
+    private void rollDayCycle(final Symbol s, final long now)
+    {
+        final long close = s.closePx;
+        if (close != NULL_PRICE)
+        {
+            s.refPrice = close;
+            s.lastRefSourceTs = Math.max(s.lastRefSourceTs, now);
+            s.computeBand();
+            s.bids.maybeRecentre(close);
+            s.asks.maybeRecentre(close);
+            ew.referencePriceApplied(close, NULL_PRICE, NULL_PRICE, s.bandLow, s.bandHigh, s.lastRefSourceTs, s.symbolId);
+        }
+        s.prevClosePx = close;
+        s.closePx = NULL_PRICE;
+        s.closeSource = Codes.CLOSE_NONE;
+        s.hasClose = false;
+        s.tradedToday = false;
+    }
+
+    // =====================================================================================
+    // band-stp: volatility interruption
+    // =====================================================================================
+
+    /**
+     * Matching stopped because the next print would leave the dynamic collar: the symbol goes to AUCTION_CALL
+     * for volatilityAuctionNs (a cluster timer). Book deltas of the continuous part are flushed first.
+     */
+    private void startVolatilityAuction(final Symbol s)
+    {
+        flushBook(false);
+        final long timerId = ++timerSeq;
+        final long end = ew.timestampNs() + s.volatilityAuctionNs;
+        s.state = AUCTION_CALL;
+        s.volTimerId = timerId;
+        s.volEndNs = end;
+        volTimers.put(timerId, s.idx);
+        ew.symbolStateChanged(0, s.symbolId, 0, CONTINUOUS, AUCTION_CALL, StateChangeCause.VOLATILITY_INTERRUPTION);
+        timers.schedule(timerId, end);
+        s.resetAuction();
+        maybeEmitIndicative(s);
+    }
+
+    /** A timer that is not a scheduled transition: the end of a volatility auction, unless it was superseded. */
+    private void onVolatilityTimer(final long timerId)
+    {
+        final long idx = volTimers.get(timerId);
+        if (idx < 0)
+        {
+            return; // superseded (halt, close, scheduled auction, day roll, removal): nothing to do
+        }
+        transition(symbols.get((int)idx), CONTINUOUS, 0, 0, StateChangeCause.VOLATILITY_AUCTION_END);
+    }
+
+    private void clearVolatilityTimer(final Symbol s)
+    {
+        volTimers.remove(s.volTimerId);
+        timers.cancel(s.volTimerId);
+        s.volTimerId = 0;
+        s.volEndNs = 0;
+    }
+
+    /**
+     * After a volatility auction that traded: the static band is re-centred on the uncross price. Like the reference
+     * a DayRollover sets, it counts as applied at max(last applied sourceTsNs, cluster time), which the event carries.
+     */
+    private void recentre(final Symbol s, final long px)
+    {
+        final long now = ew.timestampNs();
+        s.refPrice = px;
+        if (now > s.lastRefSourceTs)
+        {
+            s.lastRefSourceTs = now;
+        }
+        s.computeBand();
+        s.bids.maybeRecentre(px);
+        s.asks.maybeRecentre(px);
+        ew.referencePriceApplied(px, NULL_PRICE, NULL_PRICE, s.bandLow, s.bandHigh, s.lastRefSourceTs, s.symbolId);
     }
 
     // =====================================================================================
@@ -1265,6 +1500,10 @@ public final class MatcherShard implements ShardStateMachine
         final boolean buy = o.isBuy();
         final BookSide opp = buy ? sym.asks : sym.bids;
         final long limit = o.riskPrice;
+        // band-stp: the collar is centred on the last print before this order started matching, so one
+        // order cannot walk the price past it in small steps
+        final long centre = sym.collarCentre();
+        matchStop = STOP_NONE;
         while (o.qty > o.cumQty)
         {
             final PriceLevel lvl = opp.best();
@@ -1277,7 +1516,17 @@ public final class MatcherShard implements ShardStateMachine
             {
                 break;
             }
+            if (sym.outsideCollar(centre, px))
+            {
+                matchStop = STOP_VOLATILITY;
+                break;
+            }
             final Order m = lvl.orders.head;
+            if (m.firm == o.firm)
+            {
+                matchStop = STOP_SELF_TRADE;
+                break;
+            }
             final long q = Math.min(o.leaves(), m.leaves());
             final long matchId = idBase | ++matchSeq;
             applyFill(o, q, px);
@@ -1292,6 +1541,7 @@ public final class MatcherShard implements ShardStateMachine
             {
                 ew.trade(matchId, px, q, m.orderId, o.orderId, sym.symbolId, m.firm.firmId, o.firm.firmId, o.side, false);
             }
+            recordTrade(sym, px);
             emitFill(o, matchId, q, px, gwTs, LiquidityFlag.TAKER);
             emitFill(m, matchId, q, px, 0, LiquidityFlag.MAKER);
             if (m.leaves() == 0)
@@ -1454,7 +1704,8 @@ public final class MatcherShard implements ShardStateMachine
         }
     }
 
-    private void uncross(final Symbol s)
+    /** @return the uncross price if anything traded, else null price */
+    private long uncross(final Symbol s)
     {
         computeAuction(s);
         final long p = aPrice;
@@ -1482,6 +1733,7 @@ public final class MatcherShard implements ShardStateMachine
                 markDirty(al);
                 al.totalQty -= q;
                 ew.trade(matchId, p, q, b.orderId, a.orderId, s.symbolId, b.firm.firmId, a.firm.firmId, Codes.NO_SIDE, true);
+                recordTrade(s, p);
                 emitFill(b, matchId, q, p, 0, LiquidityFlag.AUCTION);
                 emitFill(a, matchId, q, p, 0, LiquidityFlag.AUCTION);
                 if (b.leaves() == 0)
@@ -1499,6 +1751,7 @@ public final class MatcherShard implements ShardStateMachine
         flushBook(false);
         ew.auctionUpdate(p, v, imb, s.symbolId, imbSide, true);
         s.resetAuction();
+        return v > 0 ? p : NULL_PRICE;
     }
 
     // =====================================================================================
@@ -1750,9 +2003,25 @@ public final class MatcherShard implements ShardStateMachine
             final PendingTransition p = pending.get(i);
             timers.schedule(p.timerId, p.effectiveTimeNs);
         }
+        for (int i = 0; i < symbols.size(); i++)
+        {
+            final Symbol s = symbols.get(i);
+            if (s.inVolatilityAuction())
+            {
+                timers.schedule(s.volTimerId, s.volEndNs);
+            }
+        }
     }
 
     // ---- used by SnapshotCodec.load ----
+
+    void restoreVolatilityTimer(final Symbol s)
+    {
+        if (s.inVolatilityAuction())
+        {
+            volTimers.put(s.volTimerId, s.idx);
+        }
+    }
 
     Symbol restoreSymbol(final int symbolId)
     {
