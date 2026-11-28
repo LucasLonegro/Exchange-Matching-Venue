@@ -1,6 +1,7 @@
 package io.lmb.controlplane;
 
 import io.lmb.common.Config;
+import io.lmb.common.SymbolDirectorySource;
 import io.lmb.common.Topology;
 
 import java.nio.file.Path;
@@ -16,12 +17,19 @@ public final class ControlPlaneConfig
     public int dbPoolSize = 4;
     public String adminToken = "lmb-local-admin";
     public boolean adminTokenDefaulted = true;
+    /** {@code <name> <sha256 of token>} per line: one token per operator, the audit actor is its owner. */
+    public Path operatorsFile;
+    /** false (production): refuse to start with the built-in local admin token. */
+    public boolean allowDefaultTokens = true;
     public String restHost = "127.0.0.1";
     /** 0 = ephemeral, negative = REST disabled. */
     public int restPort = -1;
     public int metricsPort = -1;
-    public Path symbolsFile;
-    public Path firmsFile;
+    /**
+     * Bearer token of {@code GET /internal/v1/symbols} (gateways, post-trade, feeds: their {@code lmb.symbols.token}).
+     * Refused at its local default when allowDefaultTokens is false.
+     */
+    public String serviceToken = SymbolDirectorySource.LOCAL_TOKEN;
 
     public boolean autoOpen = false;
     public long autoOpenDelayMs = 2_000;
@@ -77,11 +85,13 @@ public final class ControlPlaneConfig
             c.adminToken = token;
             c.adminTokenDefaulted = false;
         }
+        final String ops = t.get("lmb.controlplane.operatorsFile", null);
+        c.operatorsFile = ops == null || ops.isBlank() ? null : Path.of(ops);
+        c.allowDefaultTokens = t.getBool("lmb.controlplane.allowDefaultTokens", c.allowDefaultTokens);
         c.restHost = t.get("lmb.controlplane." + c.instanceIndex + ".bindHost", "0.0.0.0");
         c.restPort = t.controlPlaneRestPort(c.instanceIndex);
         c.metricsPort = t.controlPlaneMetricsPort(c.instanceIndex);
-        c.symbolsFile = t.symbolsFile();
-        c.firmsFile = t.firmsFile();
+        c.serviceToken = t.get("lmb.controlplane.serviceToken", c.serviceToken);
         c.autoOpen = t.getBool("lmb.controlplane.autoOpen", c.autoOpen);
         c.autoOpenDelayMs = t.getLong("lmb.controlplane.autoOpenDelayMs", c.autoOpenDelayMs);
         c.tickMs = t.getLong("lmb.controlplane.tickMs", c.tickMs);

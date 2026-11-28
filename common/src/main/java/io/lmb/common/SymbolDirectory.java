@@ -1,21 +1,21 @@
 package io.lmb.common;
 
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HexFormat;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 /**
- * Static reference data: which symbols exist and which shard owns each. Loaded from a CSV with header
- * {@code symbolId,ticker,shard,tickSize,lotSize,referencePrice,priceBandBps,maxOrderQty}
- * (prices in cents), optionally followed by {@code dynamicBandBps,volatilityAuctionNs} (band-stp; defaults
- * {@link #DEFAULT_DYNAMIC_BAND_BPS} and {@link #DEFAULT_VOLATILITY_AUCTION_NS} when the columns are absent or
- * empty). When the file has a header line, optional columns are located by name, so their order does not matter.
- * The control plane pushes these into the shards as SymbolDefinition commands.
+ * Which symbols exist and which shard owns each (prices in cents). The control plane owns them: they are created
+ * through its API ({@code POST /api/symbols}), pushed into the shards as SymbolDefinition commands, and served to the
+ * other services as a snapshot ({@code GET /internal/v1/symbols}, see {@link SymbolDirectorySource}). Consumers that
+ * read the shards' event streams also follow their {@code SymbolDefined} events.
  */
 public final class SymbolDirectory
 {
@@ -40,12 +40,19 @@ public final class SymbolDirectory
         }
     }
 
+    private final String version;
     private final List<Symbol> symbols;
     private final Map<String, Symbol> byTicker = new HashMap<>();
     private final Map<Integer, Symbol> byId = new HashMap<>();
 
     public SymbolDirectory(final List<Symbol> symbols)
     {
+        this("", symbols);
+    }
+
+    public SymbolDirectory(final String version, final List<Symbol> symbols)
+    {
+        this.version = version;
         this.symbols = Collections.unmodifiableList(new ArrayList<>(symbols));
         for (final Symbol s : symbols)
         {
@@ -56,60 +63,95 @@ public final class SymbolDirectory
         }
     }
 
-    public static SymbolDirectory load(final Path csv)
+    /** The control plane's {@code GET /internal/v1/symbols} body. */
+    public static SymbolDirectory fromJson(final String json)
     {
+        final Map<String, Object> root = Json.parseObject(json);
         final List<Symbol> out = new ArrayList<>();
-        try
+        final Object list = root.get("symbols");
+        if (list instanceof List<?> l)
         {
-            int dynCol = 8;
-            int volCol = 9;
-            for (final String raw : Files.readAllLines(csv))
+            for (final Object o : l)
             {
-                final String line = raw.trim();
-                if (line.isEmpty() || line.startsWith("#"))
-                {
-                    continue;
-                }
-                final String[] f = line.split(",", -1);
-                if (line.startsWith("symbolId"))
-                {
-                    dynCol = -1;
-                    volCol = -1;
-                    for (int i = 8; i < f.length; i++)
-                    {
-                        final String name = f[i].trim();
-                        if (name.equals("dynamicBandBps"))
-                        {
-                            dynCol = i;
-                        }
-                        else if (name.equals("volatilityAuctionNs"))
-                        {
-                            volCol = i;
-                        }
-                    }
-                    continue;
-                }
+                final Map<?, ?> m = (Map<?, ?>)o;
                 out.add(new Symbol(
-                    Integer.parseInt(f[0].trim()), f[1].trim(), Integer.parseInt(f[2].trim()),
-                    Long.parseLong(f[3].trim()), Long.parseLong(f[4].trim()), Long.parseLong(f[5].trim()),
-                    Integer.parseInt(f[6].trim()), Long.parseLong(f[7].trim()),
-                    (int)optional(f, dynCol, DEFAULT_DYNAMIC_BAND_BPS), optional(f, volCol, DEFAULT_VOLATILITY_AUCTION_NS)));
+                    (int)num(m, "symbolId"), (String)m.get("ticker"), (int)num(m, "shard"), num(m, "tickSize"),
+                    num(m, "lotSize"), num(m, "referencePrice"), (int)num(m, "priceBandBps"), num(m, "maxOrderQty"),
+                    m.get("dynamicBandBps") == null ? DEFAULT_DYNAMIC_BAND_BPS : (int)num(m, "dynamicBandBps"),
+                    m.get("volatilityAuctionNs") == null ? DEFAULT_VOLATILITY_AUCTION_NS : num(m, "volatilityAuctionNs")));
             }
         }
-        catch (final IOException e)
-        {
-            throw new IllegalStateException("cannot read symbols file " + csv, e);
-        }
-        return new SymbolDirectory(out);
+        final Object v = root.get("version");
+        return new SymbolDirectory(v == null ? "" : v.toString(), out);
     }
 
-    private static long optional(final String[] f, final int col, final long dflt)
+    /**
+     * The JSON body for these symbols. The version is a hash of the symbol list, so equal content gives an equal
+     * version whichever control plane instance serves it.
+     */
+    public static String toJson(final List<Symbol> symbols)
     {
-        if (col < 0 || col >= f.length || f[col].trim().isEmpty())
+        final List<Map<String, Object>> list = maps(symbols);
+        final Map<String, Object> root = new LinkedHashMap<>();
+        root.put("version", sha256Prefix(Json.write(list)));
+        root.put("symbols", list);
+        return Json.write(root);
+    }
+
+    /** The version {@link #toJson} gives these symbols (the server's ETag). */
+    public static String contentVersion(final List<Symbol> symbols)
+    {
+        return sha256Prefix(Json.write(maps(symbols)));
+    }
+
+    private static List<Map<String, Object>> maps(final List<Symbol> symbols)
+    {
+        final List<Map<String, Object>> list = new ArrayList<>();
+        for (final Symbol s : symbols)
         {
-            return dflt;
+            final Map<String, Object> m = new LinkedHashMap<>();
+            m.put("symbolId", s.symbolId());
+            m.put("ticker", s.ticker());
+            m.put("shard", s.shard());
+            m.put("tickSize", s.tickSize());
+            m.put("lotSize", s.lotSize());
+            m.put("referencePrice", s.referencePrice());
+            m.put("priceBandBps", s.priceBandBps());
+            m.put("maxOrderQty", s.maxOrderQty());
+            m.put("dynamicBandBps", s.dynamicBandBps());
+            m.put("volatilityAuctionNs", s.volatilityAuctionNs());
+            list.add(m);
         }
-        return Long.parseLong(f[col].trim());
+        return list;
+    }
+
+    private static String sha256Prefix(final String s)
+    {
+        try
+        {
+            final byte[] d = MessageDigest.getInstance("SHA-256").digest(s.getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(d, 0, 12);
+        }
+        catch (final NoSuchAlgorithmException e)
+        {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    private static long num(final Map<?, ?> m, final String key)
+    {
+        final Object v = m.get(key);
+        if (!(v instanceof Number n))
+        {
+            throw new IllegalArgumentException("symbol field " + key + " missing or not a number: " + m);
+        }
+        return n.longValue();
+    }
+
+    /** The snapshot version ({@link #toJson}); empty for directories built in memory. */
+    public String version()
+    {
+        return version;
     }
 
     public List<Symbol> all()

@@ -33,8 +33,7 @@ public final class Store
     }
 
     public record FirmRow(
-        int firmId, String name, String apiKey, boolean enabled, List<Long> sessionIds,
-        long creditLimit, long maxPositionPerSymbol, long updatedMs)
+        int firmId, String name, boolean enabled, long creditLimit, long maxPositionPerSymbol, long updatedMs)
     {
     }
 
@@ -154,27 +153,16 @@ public final class Store
 
     public static List<FirmRow> firms(final Connection c) throws SQLException
     {
-        final Map<Integer, List<Long>> sessions = new LinkedHashMap<>();
-        for (final long[] row : query(c, "SELECT firm_id, session_id FROM firm_session ORDER BY session_id",
-            rs -> new long[] {rs.getInt(1), rs.getLong(2)}))
-        {
-            sessions.computeIfAbsent((int)row[0], k -> new ArrayList<>()).add(row[1]);
-        }
-        return query(c, "SELECT f.firm_id, f.name, f.api_key, f.enabled, f.updated_ms, l.credit_limit, l.max_position_per_symbol, " +
+        return query(c, "SELECT f.firm_id, f.name, f.enabled, f.updated_ms, l.credit_limit, l.max_position_per_symbol, " +
                 "l.updated_ms AS limit_ms FROM firm f LEFT JOIN firm_limit l ON l.firm_id = f.firm_id ORDER BY f.firm_id",
-            rs -> new FirmRow(rs.getInt("firm_id"), rs.getString("name"), rs.getString("api_key"), rs.getBoolean("enabled"),
-                List.copyOf(sessions.getOrDefault(rs.getInt("firm_id"), List.of())), rs.getLong("credit_limit"),
+            rs -> new FirmRow(rs.getInt("firm_id"), rs.getString("name"), rs.getBoolean("enabled"), rs.getLong("credit_limit"),
                 rs.getLong("max_position_per_symbol"), Math.max(rs.getLong("updated_ms"), rs.getLong("limit_ms"))));
     }
 
     public static void insertFirm(final Connection c, final FirmRow f, final long nowMs) throws SQLException
     {
-        update(c, "INSERT INTO firm (firm_id, name, api_key, enabled, updated_ms) VALUES (?, ?, ?, ?, ?)",
-            f.firmId(), f.name(), f.apiKey(), f.enabled(), nowMs);
-        for (final long s : f.sessionIds())
-        {
-            update(c, "INSERT INTO firm_session (session_id, firm_id) VALUES (?, ?)", s, f.firmId());
-        }
+        update(c, "INSERT INTO firm (firm_id, name, enabled, updated_ms) VALUES (?, ?, ?, ?)",
+            f.firmId(), f.name(), f.enabled(), nowMs);
         update(c, "INSERT INTO firm_limit (firm_id, credit_limit, max_position_per_symbol, updated_ms) VALUES (?, ?, ?, ?)",
             f.firmId(), f.creditLimit(), f.maxPositionPerSymbol(), nowMs);
     }

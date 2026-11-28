@@ -99,6 +99,9 @@ class Topo:
         for i in range(self.i("lmb.posttrade.instances", 1)):
             t.append((f"posttrade-{i}", "lmb-posttrade", self.get(f"lmb.posttrade.{i}.host", "127.0.0.1"),
                       self.i("lmb.posttrade.metricsPort", 9810), {"instance_id": str(i)}))
+        for i in range(self.i("lmb.access.instances", 1)):
+            t.append((f"access-{i}", "lmb-access", self.get(f"lmb.access.{i}.host", "127.0.0.1"),
+                      self.i(f"lmb.access.{i}.metricsPort", self.i("lmb.access.metricsPort", 9770) + i), {"instance_id": str(i)}))
         for i in range(self.i("lmb.ledger.instances", 1)):
             t.append((f"ledger-{i}", "lmb-ledger", self.get(f"lmb.ledger.{i}.host", "127.0.0.1"),
                       self.i("lmb.ledger.metricsPort", 9820) + i, {"instance_id": str(i)}))
@@ -230,6 +233,14 @@ def recording_rules(n):
         rec("lmb:ledger_up", f"max ({n['LEDGER_UP']})")
     if n.get("LEDGER_PENDING_STATEMENT_DATES"):
         rec("lmb:ledger_pending_statement_dates", f"max ({n['LEDGER_PENDING_STATEMENT_DATES']})")
+    if n.get("GATEWAY_ACCESS_DIRECTORY_AGE"):
+        rec("lmb:gateway_access_directory_age_seconds:max", f"max ({n['GATEWAY_ACCESS_DIRECTORY_AGE']})")
+    if n.get("GATEWAY_AUTH_FAILURES_TOTAL"):
+        rec("lmb:gateway_auth_failures:rate5m", f"sum (rate({n['GATEWAY_AUTH_FAILURES_TOTAL']}[5m]))")
+    if n.get("ACCESS_UP"):
+        rec("lmb:access_up", f"max ({n['ACCESS_UP']})")
+    if n.get("ACCESS_AUTH_FAILURES_TOTAL"):
+        rec("lmb:access_auth_failures:increase15m", f"sum by (listener) (increase({n['ACCESS_AUTH_FAILURES_TOTAL']}[15m]))")
     if n.get("CONTROLPLANE_LOCK_HELD"):
         rec("lmb:controlplane_lock_holders", f"sum ({n['CONTROLPLANE_LOCK_HELD']})")
     if n.get("PTP_OFFSET"):
@@ -333,6 +344,20 @@ def alerts(slo, recorded, profile):
     alert("LmbLedgerStatementsLate", "lmb:ledger_pending_statement_dates > 0", slo.get("LEDGER_STATEMENTS_LATE_FOR", "30m"),
           "warning", "{{ $value }} trading date(s) ended on some shards but not all: daily statements not written",
           ["lmb:ledger_pending_statement_dates"])
+    alert("LmbAccessDirectoryStale",
+          f"lmb:gateway_access_directory_age_seconds:max > {slo.get('ACCESS_DIRECTORY_STALE_SECONDS', '300')}", "1m", "warning",
+          "A gateway has not reached the access service for {{ $value | humanizeDuration }}: trading continues on its last "
+          "snapshot, but new teams, keys and revocations do not reach it", ["lmb:gateway_access_directory_age_seconds:max"])
+    alert("LmbAccessDown", "lmb:access_up == 0 or absent(lmb:access_up)", slo.get("ACCESS_DOWN_FOR", "5m"), "warning",
+          "No access service instance is serving: credential changes are on hold (gateways keep their snapshot)",
+          ["lmb:access_up"])
+    alert("LmbAccessServiceTokenRejected", 'lmb:access_auth_failures:increase15m{listener="internal"} > 0', "0m", "warning",
+          "The access directory refused {{ $value }} polls in 15m: a gateway or post-trade has the wrong service token",
+          ["lmb:access_auth_failures:increase15m"])
+    alert("LmbGatewayAuthFailuresHigh",
+          f"lmb:gateway_auth_failures:rate5m > {slo.get('AUTH_FAILURES_PER_SECOND', '1')}", "10m", "warning",
+          "Gateways refuse {{ $value }} logons/queries per second (wrong or revoked keys, or someone guessing)",
+          ["lmb:gateway_auth_failures:rate5m"])
     alert("LmbControlPlaneLockHolders", "lmb:controlplane_lock_holders != 1", "1m", "page",
           "{{ $value }} control plane instances hold the scheduler lock (want exactly 1)", ["lmb:controlplane_lock_holders"])
     rules.append({"alert": "LmbTargetDown", "expr": 'up{job=~"lmb-.*"} == 0', "for": slo.get("TARGET_DOWN_FOR", "1m"),
@@ -419,6 +444,8 @@ def dashboard(recorded):
     ts("Feed gap ratio", [("lmb:feed_gap_ratio:rate5m", "{{venue}}")], "percentunit")
     ts("Stale venues", [("lmb:feed_venue_stale", "{{venue}}")], "short")
     ts("Control plane lock holders", [("lmb:controlplane_lock_holders", "holders")], "short")
+    ts("Access directory age (oldest gateway)", [("lmb:gateway_access_directory_age_seconds:max", "age")], "s")
+    ts("Auth failures", [("lmb:gateway_auth_failures:rate5m", "gateways /s")], "short")
     ts("PTP offset |abs|", [("lmb:ptp_offset_seconds:abs", "{{instance}}")], "s")
     ts("Targets up", [('up{job=~"lmb-.*"}', "{{job}} {{instance}}")], "short", 24)
     end_row()

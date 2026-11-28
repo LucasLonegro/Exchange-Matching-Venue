@@ -38,11 +38,12 @@ scripts/local-up.sh                   # start the local venue (~20-60 s)
 scripts/local-status.sh --leaders     # what is running, memory used, the leader of each shard
 scripts/lmb-run io.lmb.tools.SmokeTestMain --topology data/local/run/topology.properties \
     --protocol grpc --gateway 0 --pairs 5   # send crossing orders, check acks and fills
+scripts/lmb-team list                 # teams, members and keys in the access service
 scripts/local-logs.sh gateway-0 -f    # follow one process's log
 scripts/local-down.sh                 # stop everything (add --wipe to delete data/local)
 ```
 
-The default local profile has 14 JVMs, with two of everything that replicates:
+The default local profile has 15 JVMs, with two of everything that replicates:
 
 | Process | Count |
 |---|---|
@@ -50,12 +51,17 @@ The default local profile has 14 JVMs, with two of everything that replicates:
 | Order gateways (gRPC and FIX) | 2 |
 | Market data publishers (feeds A and B) | 2 |
 | Control plane | 2 |
+| Access service (teams, keys, tiers) | 1 |
 | Post-trade | 1 |
 | Ledger | 1 |
 | Shadow replayer | 1 per shard |
 
 Variants:
-- `scripts/local-up.sh --minimal` starts one shard with one member and one of each service (5 JVMs).
+- `scripts/local-up.sh --minimal` starts one shard with one member and one of each service.
+- There are no reference data files. Once the control plane and the access service are up,
+  `scripts/local-seed` creates the symbols, the firms' risk accounts and the teams with their
+  sessions through the APIs, and writes the issued API keys to `data/local/credentials.json` for the
+  tools. It is idempotent; `--no-seed` skips it.
 - `scripts/local-up.sh --members 3` runs 3 members per shard. With only 2 members a shard cannot
   survive losing one, so use this for failover drills (`scripts/kill-leader.sh <shard>`).
 - `scripts/local-up.sh --dry-run` prints every command line and starts nothing.
@@ -68,6 +74,7 @@ Main local endpoints:
 | Gateway | gRPC `9100+i`, FIX `9200+i`, metrics `9300+i` |
 | Market data | retransmit `9500+i`, gRPC `9510+i`, metrics `9520+i` |
 | Control plane | admin REST `9700+i` (header `X-LMB-Admin-Token: lmb-local-admin`), metrics `9710+i` |
+| Access | operators' REST `9750+i` (loopback, `Authorization: Bearer lmb-local-admin`), directory `9760+i`, metrics `9770+i` |
 | Post-trade | drop copy FIX `9800`, metrics `9810` |
 | Ledger | metrics `9820`; daily statements in `data/local/ledger/0/statements` |
 | Replayer | metrics `9900+shard` |
@@ -97,12 +104,13 @@ scripts/load-test.sh                  # latency percentiles at 1000 orders/s for
 | `marketdata/` | Market data publisher (UDP A/B, snapshots, TCP retransmit, gRPC) and client |
 | `feeds/` | Feed handler SPI, simulated external venues, NBBO consolidator (not started by default: the venue sets its own reference prices; `--consolidators N --with-feedsim`) |
 | `controlplane/` | Reference data, limits, admin REST, scheduler, risk-budget allocator |
+| `access/` | Teams, member sessions, hashed API keys, scopes and throttle tiers; the directory gateways poll |
 | `posttrade/` | FIX drop copy, Kafka bridge, WORM archiver, ClickHouse loader |
 | `ledger/` | Cash, positions, average cost, PnL, nightly marks at the official close, daily statements |
 | `replayer/` | Shadow replayer (re-runs the log and compares hashes), backtester, log verifier |
 | `tools/` | Smoke test, load generator, CLI clients |
 | `dist/` | Collects every jar; `scripts/lmb-run <main-class>` runs a service from it |
-| `scripts/` | Local up/down/status/logs, kill-leader, smoke and load tests |
+| `scripts/` | Local up/down/status/logs, kill-leader, smoke and load tests, `lmb-team` (onboarding) |
 | `deploy/` | Local config and docker-compose for infrastructure, production site and topology, Docker image, Kubernetes manifests, systemd launcher, monitoring and SLOs |
 
 ## Documentation
@@ -118,7 +126,9 @@ scripts/load-test.sh                  # latency percentiles at 1000 orders/s for
 The local profile works end to end. Orders are acked and filled through both gateways over gRPC and
 FIX. Market data is published, and the replayers report no divergence. Production artefacts exist
 (Docker image, Kubernetes manifests, systemd launcher, monitoring), but only their syntax and
-structure have been checked; they have not been deployed. Open items include firm credentials (the
-gateways still read them from a CSV file), the bare-metal host-tuning files, a matcher throughput
-benchmark and FIX cancel-on-disconnect. Each module's note in [docs/modules/](docs/modules/) lists
-the rest.
+structure have been checked; they have not been deployed. Teams are onboarded with `scripts/lmb-team`
+(access service: hashed keys, rotation, revocation, per-member sessions, throttle tiers); gRPC has TLS
+in process and FIX gets it from an Envoy proxy; cancel-on-disconnect works on both protocols. Open
+items include the bare-metal host-tuning files, a matcher throughput benchmark, and cancel-on-disconnect
+when a gateway crashes. The Python SDK, a web UI, historical data and light surveillance are not started.
+Each module's note in [docs/modules/](docs/modules/) lists the rest.

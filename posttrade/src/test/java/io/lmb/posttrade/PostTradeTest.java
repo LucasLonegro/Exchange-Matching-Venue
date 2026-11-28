@@ -1,6 +1,7 @@
 package io.lmb.posttrade;
 
-import io.lmb.common.FirmDirectory;
+import io.lmb.common.access.AccessDirectorySource;
+import io.lmb.testkit.TestAccess;
 import io.lmb.common.Topology;
 import io.lmb.sbe.ExecutionReportDecoder;
 import io.lmb.sbe.TradeDecoder;
@@ -59,8 +60,8 @@ class PostTradeTest
 
     private PostTrade start() throws Exception
     {
-        final FirmDirectory firms = new FirmDirectory(List.of(
-            new FirmDirectory.Firm(100, "alpha", "k100", List.of(1000L), 1_000_000, 1_000_000)));
+        final AccessDirectorySource firms = AccessDirectorySource.fixed(
+            TestAccess.directory(TestAccess.firm(100, "alpha", "k100", 1000)));
         postTrade = new PostTrade(config(), venue, firms, null).start();
         return postTrade;
     }

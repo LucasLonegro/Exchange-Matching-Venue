@@ -1,8 +1,9 @@
 package io.lmb.gateway;
 
 import io.lmb.api.VenueClients;
-import io.lmb.common.FirmDirectory;
 import io.lmb.common.SymbolDirectory;
+import io.lmb.common.SymbolDirectorySource;
+import io.lmb.common.access.AccessDirectorySource;
 import io.lmb.gateway.core.GatewayCore;
 import io.lmb.gateway.core.GatewayMetrics;
 import io.lmb.gateway.grpc.GrpcFrontEnd;
@@ -31,11 +32,19 @@ public final class Gateway implements AutoCloseable
     private HTTPServer http;
     private boolean closed;
 
-    public Gateway(final GatewayConfig cfg, final VenueClients venue, final SymbolDirectory symbols, final FirmDirectory firms)
+    public Gateway(final GatewayConfig cfg, final VenueClients venue, final SymbolDirectorySource symbols,
+        final AccessDirectorySource access)
     {
         this.cfg = cfg;
         this.metrics = new GatewayMetrics(venue.shardCount());
-        this.core = new GatewayCore(cfg, venue, symbols, firms, metrics);
+        this.metrics.bindAccess(access);
+        this.core = new GatewayCore(cfg, venue, symbols, access, metrics);
+    }
+
+    /** A fixed symbol directory (tests). */
+    public Gateway(final GatewayConfig cfg, final VenueClients venue, final SymbolDirectory symbols, final AccessDirectorySource access)
+    {
+        this(cfg, venue, SymbolDirectorySource.fixed(symbols), access);
     }
 
     public Gateway start() throws Exception

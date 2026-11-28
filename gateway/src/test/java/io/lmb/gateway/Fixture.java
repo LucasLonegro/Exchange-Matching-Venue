@@ -3,8 +3,10 @@ package io.lmb.gateway;
 import io.lmb.api.CommandClient;
 import io.lmb.api.EventStreamClient;
 import io.lmb.api.VenueClients;
-import io.lmb.common.FirmDirectory;
+import io.lmb.testkit.TestAccess;
 import io.lmb.common.SymbolDirectory;
+import io.lmb.common.access.AccessDirectory;
+import io.lmb.common.access.AccessDirectorySource;
 import io.lmb.testkit.InMemoryVenue;
 
 import java.nio.file.Path;
@@ -25,9 +27,9 @@ final class Fixture implements AutoCloseable
         new SymbolDirectory.Symbol(1, "AAPL", 0, 1, 1, 19000, 1000, 100_000),
         new SymbolDirectory.Symbol(2, "MSFT", 0, 1, 1, 42000, 1000, 100_000),
         new SymbolDirectory.Symbol(5, "GOOG", 1, 1, 1, 17000, 1000, 100_000)));
-    static final FirmDirectory FIRMS = new FirmDirectory(List.of(
-        new FirmDirectory.Firm(100, "Alpha", "alpha-key", List.of(1001L, 1002L), 100_000_000_000L, 5_000_000),
-        new FirmDirectory.Firm(200, "Beta", "beta-key", List.of(2001L), 100_000_000_000L, 5_000_000)));
+    static final AccessDirectory ACCESS = TestAccess.directory(
+        TestAccess.firm(100, "Alpha", "alpha-key", 1001, 1002),
+        TestAccess.firm(200, "Beta", "beta-key", 2001));
 
     final ScriptedShard[] machines = {new ScriptedShard(0), new ScriptedShard(1)};
     final InMemoryVenue inMemory = new InMemoryVenue(1_700_000_000_000_000_000L, machines);
@@ -58,6 +60,8 @@ final class Fixture implements AutoCloseable
         c.heartbeatIntervalMs = 5_000;
         c.throttleRatePerSec = 100_000;
         c.throttleBurst = 10_000;
+        c.messageRatePerSec = 100_000;
+        c.messageBurst = 20_000;
         c.inflightTimeoutMs = 150;
         c.sendTimeoutMs = 300;
         c.idleMaxParkUs = 200;
@@ -67,7 +71,12 @@ final class Fixture implements AutoCloseable
 
     Gateway gateway(final GatewayConfig cfg) throws Exception
     {
-        final Gateway g = new Gateway(cfg, venue, SYMBOLS, FIRMS).start();
+        return gateway(cfg, AccessDirectorySource.fixed(ACCESS));
+    }
+
+    Gateway gateway(final GatewayConfig cfg, final AccessDirectorySource access) throws Exception
+    {
+        final Gateway g = new Gateway(cfg, venue, SYMBOLS, access).start();
         gateways.add(g);
         if (!g.awaitReady(5_000))
         {

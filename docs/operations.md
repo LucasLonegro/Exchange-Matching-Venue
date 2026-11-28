@@ -55,8 +55,8 @@ started and exits 1 (`--keep-on-failure` leaves the system up for inspection). S
 is not in the distribution yet are **skipped with a warning** (modules land at different times); a
 missing `ClusterNodeMain` is fatal.
 
-The default profile is 14 JVMs. Heaps are small (node 160 MB, control plane 128 MB, gateway, market data,
-post-trade, ledger and replayer 96 MB, consolidator and simulator 64 MB) and `deploy/local/common.env` caps
+The default profile is 15 JVMs. Heaps are small (node 160 MB, control plane 128 MB, gateway, market data,
+post-trade, ledger and replayer 96 MB, consolidator, simulator and access 64 MB) and `deploy/local/common.env` caps
 metaspace, code cache, direct memory and thread stacks, so the worst case is about 3 GB RSS and the
 typical figure is lower; the pre-flight check compares the estimate with `MemAvailable` and refuses to
 start above it (`--force` overrides). Aeron runs in SHARED threading with backoff idle strategies and
@@ -114,6 +114,7 @@ tomorrow already works. `LMB_HEAP`, `LMB_JAVA_OPTS` (append: `LMB_JAVA_OPTS="$LM
 | Market data retransmit / gRPC / metrics | 9500+i / 9510+i / 9520+i |
 | Consolidator metrics, feed simulator metrics | 9600+i, 9650 |
 | Control plane admin REST / metrics | 9700+i / 9710+i (header `X-LMB-Admin-Token`, default token `lmb-local-admin`) |
+| Access operators' REST / directory / metrics | 9750+i (loopback) / 9760+i / 9770+i (`Authorization: Bearer lmb-local-admin`; directory token `lmb-local-access`) |
 | Post-trade drop copy FIX / metrics | 9800 / 9810 |
 | Ledger metrics | 9820 |
 | Replayer metrics | 9900 + shard (local workaround, see section 10) |
@@ -188,6 +189,17 @@ Summary of what it encodes:
   bound to its own `lmb-aeronmd@<service>-<id>.service`, grouped in `lmb.target`. Matcher nodes restart
   on failure at most 3 times in 10 minutes: a deterministic bug crashes every member on the same entry
   and must not become a restart loop.
+- **Internet edge (gateways)**: gRPC TLS in the gateway (`/etc/lmb/tls/gateway.crt`, `.key` in PKCS#8);
+  FIX TLS by `lmb-fix-tls.service` (Envoy, `deploy/baremetal/envoy/fix-tls.yaml`) on the FIX port, with
+  Artio on `127.0.0.1:9201` behind it (the rendered topology sets `lmb.gateway.fix.bindHost` and
+  `.listenPort`). Firewall: only 9100 (gRPC) and 9200 (FIX TLS) from the Internet; 9201, the access
+  service, the control plane and every metrics port from the venue's networks only.
+- **Secrets**: tokens go in root-owned `0640 root:lmb` env files, never in the topology:
+  `/etc/lmb/gateway.env` and `/etc/lmb/posttrade.env` (`LMB_GATEWAY_ACCESS_TOKEN`,
+  `LMB_POSTTRADE_ACCESS_TOKEN`), `/etc/lmb/access.env` (`LMB_ACCESS_SERVICETOKEN`, `LMB_ACCESS_DB_*`),
+  `/etc/lmb/controlplane.env` (`LMB_DB_*`). Operator token hashes in `/etc/lmb/operators/{controlplane,access}`
+  (`<name> <sha256>` lines, see 4.8). Production topologies set `allowDefaultTokens=false`, so a missing
+  file stops the service at start rather than running with the local tokens.
 
 ### 2.3 Kubernetes: `deploy/k8s/`
 
@@ -201,6 +213,16 @@ anti-affinity, local NVMe PersistentVolumes (`local-nvme` StorageClass, `WaitFor
 kubelet's static CPU manager and single-NUMA-node topology manager (`kubelet-config-matcher.yaml`), and
 the C media driver as a native sidecar sharing a memory-backed `/dev/shm`. No liveness probe on matcher
 pods: killing a busy leader for a slow probe causes the failover it was meant to prevent.
+
+**Access, TLS and policies.** The access service is a 2-replica StatefulSet (`lmb-access`, pool general,
+pod network) behind the ClusterIP Service `lmb-access-directory:9760` that gateways and post-trade poll;
+its operators' API (9750) listens on loopback, so operators use `kubectl -n lmb port-forward
+pod/lmb-access-0 9750`. Gateways mount `lmb-gateway-tls` for gRPC TLS and run a `fix-tls` Envoy sidecar
+(ConfigMap `lmb-fix-tls`) that owns the FIX port 9200 and forwards to Artio on 127.0.0.1:9201. Secrets
+(`lmb-secrets`, `lmb-operators`, `lmb-gateway-tls`) are listed in the docstring of `render.py`.
+NetworkPolicies: the control plane's REST only from `operatorNamespaces` (and the other control plane
+pod), the access directory only from post-trade pods and `nodeCidrs` (the host-network gateways), metrics
+only from `monitoringNamespace`.
 
 **Networking trade-off.** The manifests use `hostNetwork: true` for nodes, gateways, market data and
 consolidators: no overlay, veth or conntrack in the path (the CNI typically adds 10-30 us and jitter), and
@@ -259,11 +281,13 @@ Quantiles are per process (HdrHistogram over a window); they are aggregated acro
 ## 4. Runbooks
 
 All admin actions go through the control plane REST API (either instance; only the lock holder runs the
-scheduler and allocator, but every instance accepts admin calls): `X-LMB-Admin-Token: <token>`,
-`X-LMB-Actor: <your name>` (audited, `GET /api/audit`). `CP=http://<controlplane>:9700`.
+scheduler and allocator, but every instance accepts admin calls) with your own operator token:
+`X-LMB-Admin-Token: <token>`. The audit (`GET /api/audit`) records the operator the token belongs to;
+`X-LMB-Actor` is honoured only on local setups with the single shared token. `CP=http://<controlplane>:9700`.
+Teams, members and keys are the access service's (4.8).
 
 ```bash
-cp() { curl -fsS -H "X-LMB-Admin-Token: $LMB_ADMIN_TOKEN" -H "X-LMB-Actor: $USER" "$@"; }
+cp() { curl -fsS -H "X-LMB-Admin-Token: $(cat ~/.lmb/controlplane-token)" "$@"; }
 ```
 
 ### 4.1 Start of day
@@ -364,15 +388,53 @@ remove-and-relist:
 1. Prefer end of day. Intraday it is an emergency procedure announced to participants.
 2. Halt the symbol on the old shard; announce. Then `DELETE /api/symbols/<id>` (state REMOVED: every
    resting order is canceled with `SYMBOL_REMOVED`, participants get the reports).
-3. Change the symbol's shard in the reference data (control plane database; the CSV in
-   `lmb.symbols` for the static profile) and let gateways and market data reload the `SymbolDirectory`
-   (control plane `refDataReloadMs`; or a rolling restart of gateways and publishers).
+3. Change the symbol's shard in the control plane database (the only copy of the reference data). Gateways
+   pick it up from the symbol directory (`GET /internal/v1/symbols`, polled every `lmb.symbols.pollMs`) and from
+   the new shard's `SymbolDefined`; consolidators need a restart.
 4. Define it on the new shard (`POST /api/symbols` -> `SymbolDefinition`), start in AUCTION_CALL, let
    participants re-enter orders, uncross, continue.
 5. Risk: the firm's per-shard budgets rebalance from `RiskLimitApplied` (allocator). Positions for the
    symbol stay on the old shard for the rest of the day (contract: risk is per shard).
 Design the shard map so that the top symbols by message rate are spread out from the start; keep 30 %
 headroom per shard (section 6).
+
+### 4.8 Teams, members and keys
+
+`scripts/lmb-team` (python3, no dependencies) talks to the access service's operators' API and, when
+registering a team, to the control plane for its risk limits. Production:
+
+```bash
+kubectl -n lmb port-forward pod/lmb-access-0 9750 &      # or: ssh -L 9750:127.0.0.1:9750 access-az-a-01
+export LMB_ACCESS_TOKEN_FILE=~/.lmb/access-token LMB_CONTROLPLANE_TOKEN_FILE=~/.lmb/controlplane-token
+export LMB_CONTROLPLANE_URL=http://<controlplane>:9700
+```
+
+| Task | Command |
+|---|---|
+| New team, one session and key per member | `lmb-team register 400 "Delta Quant" --member alice --member bob --tier restricted --credit-limit <cents> --max-position <shares>` |
+| Another member | `lmb-team add-member 400 carol` |
+| Panic key (cancel only) / drop copy key | `lmb-team issue-key 400 --scopes CANCEL` / `--scopes DROP_COPY` |
+| Planned rotation | `lmb-team rotate <keyId> --grace-hours 24` (both keys work for 24 h, then the old one's connections end) |
+| Leaked key | `lmb-team revoke <keyId>`, then `lmb-team issue-key ...`; the connections end within about 3 s |
+| Suspend a team's access | `lmb-team disable 400` (ends every session; orders are canceled where cancel-on-disconnect is on: also `cp -X POST $CP/api/firms/400/kill?cancelOrders=true` to be sure) |
+| Promote a bot | `lmb-team set-tier 400 bot` or `set-session-tier <sessionId> bot` (effective at the next logon) |
+| Who did what | `lmb-team audit 50` |
+
+Keys are printed once: hand them over on the spot (a password manager share, not chat). Only their SHA-256
+is stored, so a lost key is revoked and reissued, never recovered.
+
+Operator tokens (both admin APIs): generate a token, keep it in `~/.lmb/`, and add its hash to the
+`lmb-operators` secret (k8s) or `/etc/lmb/operators/<service>` (bare metal):
+
+```bash
+tok=$(openssl rand -base64 32 | tr -d '=+/' ); echo "$tok" > ~/.lmb/access-token; chmod 600 ~/.lmb/access-token
+printf '%s %s\n' "$USER" "$(printf '%s' "$tok" | sha256sum | cut -d' ' -f1)"   # line for the operators file
+```
+
+The services read the file at start; restart the access service and control plane instances one at a time to
+pick up a new operator (any instance serves either API). The service token (`access-service-token`) is shared by
+the access service, gateways and post-trade: rotate it by updating the secret and restarting all three
+(gateways keep their snapshot meanwhile, so the order path is unaffected).
 
 ---
 
@@ -486,7 +548,8 @@ failure test that only checks "the system came back" is not a correctness test.
 | `deploy/prod/` | production topology generator, inventory example, rendered primary and DR topologies |
 | `deploy/docker/` | container images (distribution, Aeron C media driver) |
 | `deploy/k8s/` | Kubernetes renderer, values, kubelet config, rendered manifests |
-| `deploy/baremetal/` | systemd units, host tuning, tuned profile, sysctl, linuxptp, notes |
+| `deploy/baremetal/` | systemd units (including `lmb-fix-tls.service`), Envoy FIX TLS config, host tuning, tuned profile, sysctl, linuxptp, notes |
+| `scripts/lmb-team` | operator CLI for teams, members, keys and tiers (access service + control plane) |
 | `deploy/bin/` | production launcher, thread pinning, PTP exporter (used by bare metal and the image) |
 
 ---

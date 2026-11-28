@@ -1,5 +1,6 @@
 package io.lmb.controlplane;
 
+import io.lmb.common.Json;
 import io.lmb.controlplane.TrackedCommand.Kind;
 import io.lmb.controlplane.db.Store;
 import io.lmb.sbe.MassCancelScope;
@@ -279,6 +280,28 @@ public final class AdminExecutor implements Engine.Duty
                 engine.fencedTx(c -> Store.setLimits(c, f.firmId(), credit, maxPos, nowMs));
                 yield firmPass(engine, auditId, f.firmId(), null);
             }
+            case "CREATE_FIRM" ->
+            {
+                final long id = lng(p, "firmId", -1);
+                final String name = str(p, "name", null);
+                final long credit = lng(p, "creditLimit", -1);
+                final long maxPos = lng(p, "maxPositionPerSymbol", -1);
+                if (id < 1 || id > 0xFFFF_FFFEL || name == null || credit < 0 || maxPos < 0)
+                {
+                    throw new Rejected("firmId, name, creditLimit >= 0 and maxPositionPerSymbol >= 0 are required");
+                }
+                engine.reloadRefData();
+                if (engine.ref().firmById().containsKey((int)id))
+                {
+                    throw new Rejected("firm " + id + " already exists");
+                }
+                engine.fencedTx(c ->
+                {
+                    Store.insertFirm(c, new Store.FirmRow((int)id, name, true, credit, maxPos, nowMs), nowMs);
+                    return null;
+                });
+                yield firmPass(engine, auditId, (int)id, "risk limits only: register the team's sessions and keys with the access service");
+            }
             case "KILL_FIRM", "ENABLE_FIRM" ->
             {
                 final Store.FirmRow f = firm(engine, p);
@@ -312,9 +335,9 @@ public final class AdminExecutor implements Engine.Duty
                     }
                     case SESSION ->
                     {
+                        // sessions belong to the access service; the shard checks the session is the firm's
                         final long session = lng(p, "sessionId", -1);
-                        final Store.FirmRow f = engine.ref().firms().stream().filter(x -> x.sessionIds().contains(session))
-                            .findFirst().orElseThrow(() -> new Rejected("unknown session " + session));
+                        final Store.FirmRow f = firm(engine, p);
                         for (final int s : shards(engine, p))
                         {
                             out.add(massCancel(engine, auditId, s, scope, f.firmId(), 0, session));

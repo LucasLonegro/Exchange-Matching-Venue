@@ -1,6 +1,7 @@
 package io.lmb.gateway.core;
 
 import io.lmb.api.EventStreamClient;
+import io.lmb.common.access.AccessDirectory;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -14,6 +15,10 @@ import java.util.Map;
  * is a guard: only events above it are delivered) or CATCH-UP (a private event stream reader
  * re-reads from {@code cursor}, the last event handled for this session, until it reaches the live
  * reader and hands over).
+ *
+ * <p>What the session may do is fixed at logon: the {@link AccessDirectory.Grant} (scopes, throttle tier) is kept
+ * here for the life of the connection and never looked up again per message. A newer access snapshot only matters
+ * if it revokes the grant, which ends the connection.
  */
 public final class SessionState
 {
@@ -34,8 +39,19 @@ public final class SessionState
     final int firmId;
     SessionOutlet outlet;
     long nextExpectedClientSeq;
-    boolean cancelOnDisconnect;
-    TokenBucket bucket;
+    AccessDirectory.Grant grant;
+    /** TRADE scope: new orders and replaces. Without it only cancels and mass cancels. */
+    boolean canTrade;
+    /** Cancel-on-disconnect: on a lost connection, on a logout, and how long to wait before cancelling. */
+    boolean codOnDisconnect;
+    boolean codOnLogout;
+    long codWindowNs;
+    /** New orders and replaces. */
+    TokenBucket orderBucket;
+    /** Every request, cancels included. */
+    TokenBucket messageBucket;
+    double orderRatePerSec;
+    double messageRatePerSec;
 
     final long[] cursor;
     final long[] possDupUpTo;
@@ -78,5 +94,10 @@ public final class SessionState
     public long nextExpectedClientSeq()
     {
         return nextExpectedClientSeq;
+    }
+
+    public AccessDirectory.Grant grant()
+    {
+        return grant;
     }
 }

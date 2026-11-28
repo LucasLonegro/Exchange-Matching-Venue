@@ -95,6 +95,9 @@ final class TestClient implements AutoCloseable
         requests.request(n);
     }
 
+    /** Sent with every logon (0: cancel at once). */
+    int codWindowMs;
+
     LogonAck logon(final int firm, final long session, final String key)
     {
         return logon(firm, session, key, false, 1);
@@ -114,7 +117,7 @@ final class TestClient implements AutoCloseable
         final ShardCursor... resume)
     {
         final Logon.Builder l = Logon.newBuilder().setFirmId(firm).setSessionId(session).setApiKey(key)
-            .setCancelOnDisconnect(cod).setNextSeq(nextSeq);
+            .setCancelOnDisconnect(cod).setCancelOnDisconnectWindowMs(codWindowMs).setNextSeq(nextSeq);
         for (final ShardCursor c : resume)
         {
             l.addResumeFrom(c);

@@ -6,7 +6,6 @@ import io.lmb.sbe.SymbolState;
 import io.lmb.testkit.InMemoryVenue;
 import org.junit.jupiter.api.Test;
 
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 
@@ -74,13 +73,11 @@ class ReconcilerTest
         final long definitions = s0.count("DEF") + s1.count("DEF");
         cp.close();
 
-        // CSV changes after bootstrap are ignored: the database is the source of truth
-        Files.writeString(data.resolve("symbols.csv"), TestSupport.SYMBOLS + "9,IBM,0,1,1,15000,1000,100000\n");
+        // a restart resumes from the database and the observed state: nothing is defined twice
         final ControlPlane again = start(TestSupport.config(url, data, "a"));
         run(venue, 10, 2_000, again);
         assertEquals(6, again.db().read(Store::symbols).size());
         assertEquals(definitions, s0.count("DEF") + s1.count("DEF"), "restart re-sends no definitions");
-        assertEquals(1L, (long)again.db().read(c -> Database.queryLong(c, "SELECT COUNT(*) FROM bootstrap_marker")));
         assertNotNull(again.db().read(c -> Store.cursor(c, 0)));
         assertTrue(again.db().read(c -> Store.cursor(c, 0)).eventSeq() > 0);
         again.close();

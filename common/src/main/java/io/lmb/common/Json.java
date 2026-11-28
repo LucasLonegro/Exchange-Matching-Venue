@@ -1,4 +1,4 @@
-package io.lmb.controlplane;
+package io.lmb.common;
 
 import java.util.ArrayList;
 import java.util.Collection;

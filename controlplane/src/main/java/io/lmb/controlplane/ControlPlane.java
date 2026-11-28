@@ -1,19 +1,17 @@
 package io.lmb.controlplane;
 
 import io.lmb.api.VenueClients;
-import io.lmb.common.FirmDirectory;
-import io.lmb.common.SymbolDirectory;
+import io.lmb.common.SymbolDirectorySource;
 import io.lmb.controlplane.db.Database;
 import io.lmb.controlplane.db.Migrator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-import java.nio.file.Files;
 import java.util.concurrent.locks.LockSupport;
 
 /**
- * One control plane instance: database (migrated, bootstrapped), leadership lease, leader engine with its
+ * One control plane instance: database (migrated), leadership lease, leader engine with its
  * duties, admin REST API and metrics. {@link #start(boolean)} with threads=false lets tests drive it
  * deterministically through {@link #step()}.
  */
@@ -49,18 +47,17 @@ public final class ControlPlane implements AutoCloseable
         db = Database.open(cfg.dbUrl, cfg.dbUser, cfg.dbPassword, cfg.dbPoolSize);
         final int applied = Migrator.migrate(db);
         LOG.info("database {} ready ({} migrations applied)", db.dialect(), applied);
-        if (cfg.symbolsFile != null && cfg.firmsFile != null && Files.exists(cfg.symbolsFile) && Files.exists(cfg.firmsFile))
+        if (SymbolDirectorySource.LOCAL_TOKEN.equals(cfg.serviceToken) && !cfg.allowDefaultTokens)
         {
-            Bootstrap.bootstrapIfEmpty(db, SymbolDirectory.load(cfg.symbolsFile), FirmDirectory.load(cfg.firmsFile),
-                cfg.symbolsFile + "," + cfg.firmsFile, clock.epochMs());
+            throw new IllegalStateException("lmb.controlplane.allowDefaultTokens=false: set lmb.controlplane.serviceToken");
         }
-        else if (!Bootstrap.isBootstrapped(db))
+        if (cfg.operatorsFile == null && cfg.adminTokenDefaulted)
         {
-            LOG.warn("database is empty and reference data files {} / {} are missing", cfg.symbolsFile, cfg.firmsFile);
-        }
-        if (cfg.adminTokenDefaulted)
-        {
-            LOG.warn("lmb.controlplane.adminToken not set; using the local default token");
+            if (!cfg.allowDefaultTokens)
+            {
+                throw new IllegalStateException("lmb.controlplane.allowDefaultTokens=false: set lmb.controlplane.operatorsFile");
+            }
+            LOG.warn("lmb.controlplane.operatorsFile and adminToken not set; using the local default token");
         }
         metrics = new Metrics();
         metrics.start(cfg.metricsPort);

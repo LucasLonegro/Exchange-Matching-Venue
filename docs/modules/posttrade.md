@@ -23,8 +23,9 @@ after `restartBackoffMs` (the process keeps running).
 
 ## FIX drop copy
 - Logon: SenderCompID 1-32 chars `[A-Za-z0-9_.-]` (identifies the client and its cursor), TargetCompID = `compId`,
-  Username(553) = firm id and Password(554) = that firm's API key from the firms CSV; or Username `ALL` with the admin
-  key for a session that receives every firm's reports (disabled when no admin key is configured).
+  Username(553) = firm id and Password(554) = a key of that firm with the `DROP_COPY` scope, checked against the access
+  service's directory (polled like the gateways do, docs/modules/access.md); or Username `ALL` with the admin key for a session that receives every firm's reports (disabled when
+  no admin key is configured). Ordinary trading keys (TRADE, QUERY) cannot open a drop copy.
 - Content: ExecutionReports whose exec type is in `execTypes` (default fills, partial fills, cancels, expiries), mapped
   like the gateway's FIX reports, plus LmbShardID(20001), LmbEventSeq(20002), LmbFirmID(20003), LmbSessionID(20004).
   (LmbShardID, LmbEventSeq) identifies a report. A canceled or expired report names the venue's `CancelReason` in
@@ -69,6 +70,10 @@ Every key: system property / environment, then the topology file, then the defau
 | `lmb.posttrade.tradestore.commitIntervalMs` | 100 | |
 | `lmb.posttrade.tradestore.commitBatch` | 1000 | |
 | `lmb.posttrade.dropcopy.enabled` | true | |
+| `lmb.posttrade.access.url` | none (required) | access service directory (`http://host:9760`) |
+| `lmb.symbols.url`, `.token`, `.pollMs` | every control plane instance, `lmb-local-symbols`, 5000 | the control plane's symbol directory, for the drop copy's tickers; `PostTradeMain` waits for a first snapshot (or its cache, `<dataDir>/symbol-directory.json`) |
+| `lmb.posttrade.access.token` | `lmb-local-access` | the directory's bearer token |
+| `lmb.posttrade.access.pollMs` | 2000 | |
 | `lmb.posttrade.dropCopyFixPort` | 9800 (+ instance) | FIX acceptor port |
 | `lmb.posttrade.dropcopy.compId` | `LMB` | our CompID (client's TargetCompID) |
 | `lmb.posttrade.dropcopy.adminKey` | none | password of the `ALL` session; none = no ALL session |
@@ -89,9 +94,9 @@ close their sinks cleanly (final commit, checkpoint, FIX logouts), then the FIX 
 connection.
 
 ## Tests
-`./mvnw -q -pl posttrade test` (15 tests, no Docker or network): TradeStoreTest 6, CursorFileTest 1,
-DropCopySinkTest 4 (per-firm/ALL filtering over a real FIX initiator, catch-up then live, refused logons, clean restart
-without resend, SELF_TRADE cancel in Text(58)), SurveillanceSinkTest 3 (record content, recovery from lost and torn
+`./mvnw -q -pl posttrade test` (16 tests, no Docker or network): TradeStoreTest 6, CursorFileTest 1,
+DropCopySinkTest 5 (per-firm/ALL filtering over a real FIX initiator, catch-up then live, refused logons, clean restart
+without resend, SELF_TRADE cancel in Text(58), firm logons needing the DROP_COPY scope), SurveillanceSinkTest 3 (record content, recovery from lost and torn
 writes with redelivery, SELF_TRADE cancel record),
 PostTradeTest 1 (local profile end to end: READY line, metrics endpoint, restart on the same data dir without duplicates).
 Ports: drop copy tests FIX 37000-37049, PostTradeTest FIX 37050-37089 and metrics 37150-37189.
@@ -102,6 +107,7 @@ Ports: drop copy tests FIX 37000-37049, PostTradeTest FIX 37050-37089 and metric
 - The crash path of the drop copy (PossResend=Y on replays) is implemented but not covered by a test.
 - Catch-up switches to live when a client's reader reaches the runner's position; under a sustained rate higher than one
   reader poll per loop it can lag behind for a while (it does not lose reports).
+- A drop copy session is authenticated at logon only: revoking its key does not end a connected session.
 - Drop copy client cursors are never pruned; a new SenderCompID replays the whole retained stream (use LmbResumeFrom).
 - The surveillance file is scanned fully on start to find the resume point (fine for a day's file, slow for huge ones).
 - `PostTradeMain` is not tested as a separate process (SIGTERM); its ready logic is tested in-process.

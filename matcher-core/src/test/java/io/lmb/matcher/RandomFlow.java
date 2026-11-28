@@ -178,7 +178,7 @@ final class RandomFlow
         if (r < 950)
         {
             final MassCancelScope[] scopes = MassCancelScope.values();
-            final MassCancelScope scope = scopes[rnd.nextInt(5)];
+            final MassCancelScope scope = scopes[rnd.nextInt(6)];
             final CancelReason reason = new CancelReason[] {CancelReason.MASS_CANCEL, CancelReason.DISCONNECT, CancelReason.ADMIN}[rnd.nextInt(3)];
             return Cmd.massCancel(corr++, session, firm, sym, 1, 1 + rnd.nextInt(2), scope, reason);
         }

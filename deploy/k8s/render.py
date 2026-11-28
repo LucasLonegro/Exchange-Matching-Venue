@@ -7,10 +7,17 @@
 Inputs: deploy/prod/site.json (shards, members, zones) and deploy/k8s/values-prod.json.
 Outputs (rendered/): 00-base.yaml (namespace, priority class, storage class, topology ConfigMap),
 10-shards.yaml (per shard: headless Service, StatefulSet, PodDisruptionBudget), 20-services.yaml
-(gateways, market data, consolidators, control plane, post-trade, ledger, replayers), 30-dr-backup.yaml
-(for the DR region's cluster). Secrets are not rendered: create `lmb-secrets` (keys cluster-secret,
-db-url, db-user, db-password, ledger-db-url, ledger-db-user, ledger-db-password, admin-token) with your
-secret manager.
+(gateways, market data, consolidators, control plane, access, post-trade, ledger, replayers, network
+policies), 30-dr-backup.yaml (for the DR region's cluster). Secrets are not rendered; create them with your
+secret manager:
+  lmb-secrets          cluster-secret, db-url, db-user, db-password, ledger-db-url, ledger-db-user,
+                       ledger-db-password, access-db-url, access-db-user, access-db-password,
+                       access-service-token (gateways and post-trade read the access directory with it),
+                       controlplane-service-token (gateways, post-trade and consolidators read the symbol
+                       directory, GET /internal/v1/symbols, with it)
+  lmb-operators        controlplane, access: one `<name> <sha256 of token>` line per operator
+  lmb-gateway-tls      tls.crt, tls.key (type kubernetes.io/tls; the key in PKCS#8, e.g. cert-manager
+                       privateKey.encoding: PKCS8): gRPC TLS in the gateway, FIX TLS in its Envoy sidecar
 
 Design notes (docs/operations.md 2.3): one StatefulSet per shard, 3 replicas spread one per zone,
 hostNetwork for the latency path, Guaranteed QoS with integer CPUs, local NVMe PVs, the Aeron C driver
@@ -70,10 +77,21 @@ def topology(site, v):
     for i in range(2):
         lines += [f"lmb.controlplane.{i}.host={svc_dns(f'lmb-controlplane-{i}', 'lmb-controlplane', v)}",
                   f"lmb.controlplane.{i}.restPort=9700", f"lmb.controlplane.{i}.metricsPort=9710"]
+    a = v["access"]["replicas"]
+    access_url = f"http://lmb-access-directory.{v['namespace']}.svc.{v['clusterDomain']}:9760"
+    lines.append(f"lmb.access.instances={a}")
+    for i in range(a):
+        lines += [f"lmb.access.{i}.host={svc_dns(f'lmb-access-{i}', 'lmb-access', v)}", f"lmb.access.{i}.adminPort=9750",
+                  f"lmb.access.{i}.internalPort=9760", f"lmb.access.{i}.metricsPort=9770"]
+    lines += ["lmb.access.operatorsFile=/etc/lmb/operators/access", "lmb.access.allowDefaultTokens=false",
+              "lmb.controlplane.operatorsFile=/etc/lmb/operators/controlplane", "lmb.controlplane.allowDefaultTokens=false",
+              f"lmb.gateway.access.url={access_url}", f"lmb.posttrade.access.url={access_url}",
+              "lmb.gateway.tls.certChain=/etc/lmb/tls/tls.crt", "lmb.gateway.tls.privateKey=/etc/lmb/tls/tls.key",
+              # Artio on loopback, the Envoy sidecar owns the FIX port with TLS
+              "lmb.gateway.fix.bindHost=127.0.0.1", "lmb.gateway.fix.listenPort=9201"]
     lines += ["lmb.posttrade.dropCopyFixPort=9800", "lmb.posttrade.metricsPort=9810", "lmb.ledger.metricsPort=9820",
               "lmb.replayer.metricsPort=9900",
-              "lmb.feedsim.instances=0",
-              "lmb.symbols=/etc/lmb/refdata/symbols.csv", "lmb.firms=/etc/lmb/refdata/firms.csv"]
+              "lmb.feedsim.instances=0"]
     return "\n".join(lines) + "\n"
 
 
@@ -174,8 +192,6 @@ def lmb_container(v, service, cfg, env, metrics_port, ports, mounts, huge=None, 
         "securityContext": {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True,
                             "capabilities": {"drop": ["ALL"], "add": ["IPC_LOCK", "SYS_NICE"]}},
         "volumeMounts": [{"name": "config", "mountPath": "/etc/lmb/topology.properties", "subPath": "topology.properties"},
-                         {"name": "config", "mountPath": "/etc/lmb/refdata/symbols.csv", "subPath": "symbols.csv"},
-                         {"name": "config", "mountPath": "/etc/lmb/refdata/firms.csv", "subPath": "firms.csv"},
                          {"name": "logs", "mountPath": "/var/log/lmb"}] + mounts,
     }
     if ready:
@@ -221,10 +237,6 @@ def pdb(v, name, sel, max_unavailable=1):
 
 # ---------------------------------------------------------------------------------------------------
 def base_docs(site, v):
-    with open(os.path.join(ROOT, "deploy", "local", "symbols.csv")) as f:
-        symbols = f.read()
-    with open(os.path.join(ROOT, "deploy", "local", "firms.csv")) as f:
-        firms = f.read()
     ns = v["namespace"]
     return [
         {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": ns, "labels": {"pod-security.kubernetes.io/enforce": "privileged"}}},
@@ -235,9 +247,7 @@ def base_docs(site, v):
         {"apiVersion": "storage.k8s.io/v1", "kind": "StorageClass", "metadata": {"name": v["storageClass"]},
          "provisioner": "kubernetes.io/no-provisioner", "volumeBindingMode": "WaitForFirstConsumer", "reclaimPolicy": "Retain"},
         {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "lmb-topology", "namespace": ns},
-         "data": {"topology.properties": topology(site, v),
-                  "symbols.csv": symbols, "firms.csv": firms,
-                  "README": "symbols.csv/firms.csv are the sample reference data; production renders them from the control plane database at start of day.\n"}},
+         "data": {"topology.properties": topology(site, v)}},
     ]
 
 
@@ -285,6 +295,8 @@ def service_docs(site, v):
         ("marketdata", v["marketdata"]["replicas"], [("retransmit", 9500, "TCP"), ("grpc", 9510, "TCP"), ("metrics", 9520, "TCP")], 9520, True),
         ("consolidator", v["consolidator"]["replicas"], [("metrics", 9600, "TCP")], 9600, True),
         ("controlplane", v["controlplane"]["replicas"], [("rest", 9700, "TCP"), ("metrics", 9710, "TCP")], 9710, False),
+        # stateless over its database; the operators' API (9750) listens on loopback: kubectl port-forward
+        ("access", v["access"]["replicas"], [("directory", 9760, "TCP"), ("metrics", 9770, "TCP")], 9770, False),
         ("posttrade", v["posttrade"]["replicas"], [("dropcopy", 9800, "TCP"), ("metrics", 9810, "TCP")], 9810, False),
         # exactly one ledger: it is the only writer of its tables
         ("ledger", 1, [("metrics", 9820, "TCP")], 9820, False),
@@ -303,21 +315,38 @@ def service_docs(site, v):
                            [{"name": "scratch", "mountPath": "/var/lib/lmb"}]) +
                           ([{"name": "shm", "mountPath": "/dev/shm"}]),
                           external_driver=ext_driver)
-        if comp == "controlplane":
-            c["env"] += [{"name": k, "valueFrom": {"secretKeyRef": {"name": v["secretName"], "key": key}}}
-                         for k, key in (("LMB_DB_URL", "db-url"), ("LMB_DB_USER", "db-user"), ("LMB_DB_PASSWORD", "db-password"),
-                                        ("LMB_CONTROLPLANE_ADMINTOKEN", "admin-token"))]
+        secret_env = {
+            "controlplane": (("LMB_DB_URL", "db-url"), ("LMB_DB_USER", "db-user"), ("LMB_DB_PASSWORD", "db-password"),
+                             ("LMB_CONTROLPLANE_SERVICETOKEN", "controlplane-service-token")),
+            "access": (("LMB_ACCESS_DB_URL", "access-db-url"), ("LMB_ACCESS_DB_USER", "access-db-user"),
+                       ("LMB_ACCESS_DB_PASSWORD", "access-db-password"), ("LMB_ACCESS_SERVICETOKEN", "access-service-token")),
+            "gateway": (("LMB_GATEWAY_ACCESS_TOKEN", "access-service-token"), ("LMB_SYMBOLS_TOKEN", "controlplane-service-token")),
+            "posttrade": (("LMB_POSTTRADE_ACCESS_TOKEN", "access-service-token"), ("LMB_SYMBOLS_TOKEN", "controlplane-service-token")),
+            "consolidator": (("LMB_SYMBOLS_TOKEN", "controlplane-service-token"),),
+        }.get(comp, ())
+        c["env"] += [{"name": k, "valueFrom": {"secretKeyRef": {"name": v["secretName"], "key": key}}} for k, key in secret_env]
+        extra_vols = []
+        if comp in ("controlplane", "access"):
+            c["volumeMounts"].append({"name": "operators", "mountPath": "/etc/lmb/operators", "readOnly": True})
+            extra_vols.append({"name": "operators", "secret": {"secretName": "lmb-operators", "defaultMode": 0o440}})
+        sidecars = []
+        if comp == "gateway":
+            c["volumeMounts"].append({"name": "tls", "mountPath": "/etc/lmb/tls", "readOnly": True})
+            c["ports"] = [p for p in c["ports"] if p["name"] != "fix"]
+            extra_vols += [{"name": "tls", "secret": {"secretName": "lmb-gateway-tls", "defaultMode": 0o440}},
+                           {"name": "fix-tls", "configMap": {"name": "lmb-fix-tls"}}]
+            sidecars.append(fix_tls_sidecar(v))
         if comp == "ledger":
             c["env"] += [{"name": k, "valueFrom": {"secretKeyRef": {"name": v["secretName"], "key": key}}}
                          for k, key in (("LMB_LEDGER_DB_URL", "ledger-db-url"), ("LMB_LEDGER_DB_USER", "ledger-db-user"),
                                         ("LMB_LEDGER_DB_PASSWORD", "ledger-db-password"))]
         if comp == "replayer":
             c["env"].append({"name": "LMB_REPLAYER_METRICSPORT", "value": "9900"})
-        vols = [{"name": "shm", "emptyDir": {"medium": "Memory", "sizeLimit": "2Gi"}}]
+        vols = [{"name": "shm", "emptyDir": {"medium": "Memory", "sizeLimit": "2Gi"}}] + extra_vols
         if not cfg.get("storage"):
             vols.append({"name": "scratch", "emptyDir": {"sizeLimit": "50Gi"}})
         init = [aeronmd_sidecar(v, cfg["driverCpu"], "1Gi", comp)] if ext_driver else None
-        spec = pod_spec(v, comp, cfg, [c], init=init, host_network=cfg.get("hostNetwork", False), extra_volumes=vols,
+        spec = pod_spec(v, comp, cfg, [c] + sidecars, init=init, host_network=cfg.get("hostNetwork", False), extra_volumes=vols,
                         anti_affinity_labels=sel if comp != "replayer" else None, zone_terms=zone_terms,
                         spread_labels=sel if zone == "spread" else None)
         if zone == "spread":
@@ -326,13 +355,105 @@ def service_docs(site, v):
         docs.append(headless(v, name, sel, ports))
         pvc = (cfg["storage"], cfg.get("storageClass", v["storageClass"])) if cfg.get("storage") else None
         docs.append(statefulset(v, name, comp, replicas, sel, spec, name, pvc, mport))
-        if comp in ("gateway", "marketdata", "controlplane", "posttrade"):
+        if comp in ("gateway", "marketdata", "controlplane", "posttrade", "access"):
             docs.append(pdb(v, name, sel))
     # admin REST for operators (any control plane instance accepts admin calls)
     docs.append({"apiVersion": "v1", "kind": "Service",
                  "metadata": {"name": "lmb-admin", "namespace": v["namespace"]},
                  "spec": {"selector": labels("controlplane"), "ports": [{"name": "rest", "port": 9700, "targetPort": 9700}]}})
+    # the access directory the gateways and post-trade poll (any instance answers)
+    docs.append({"apiVersion": "v1", "kind": "Service",
+                 "metadata": {"name": "lmb-access-directory", "namespace": v["namespace"]},
+                 "spec": {"selector": labels("access"), "ports": [{"name": "directory", "port": 9760, "targetPort": 9760}]}})
+    docs.append({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "lmb-fix-tls", "namespace": v["namespace"]},
+                 "data": {"envoy.yaml": FIX_TLS_ENVOY}})
+    docs += network_policies(v)
     return docs
+
+
+# Envoy terminating TLS for the gateway's FIX port (Artio has no TLS); same listener as
+# deploy/baremetal/envoy/fix-tls.yaml with the Secret's file names. Logs (with the participant's address,
+# which Artio no longer sees) go to stdout.
+FIX_TLS_ENVOY = """admin:
+  address: {socket_address: {address: 127.0.0.1, port_value: 15201}}
+static_resources:
+  listeners:
+    - name: fix_tls
+      address: {socket_address: {address: 0.0.0.0, port_value: 9200}}
+      per_connection_buffer_limit_bytes: 65536
+      filter_chains:
+        - transport_socket:
+            name: envoy.transport_sockets.tls
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+              common_tls_context:
+                tls_params: {tls_minimum_protocol_version: TLSv1_2}
+                tls_certificates:
+                  - certificate_chain: {filename: /etc/lmb/tls/tls.crt}
+                    private_key: {filename: /etc/lmb/tls/tls.key}
+          filters:
+            - name: envoy.filters.network.tcp_proxy
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+                stat_prefix: fix_tls
+                cluster: artio
+                idle_timeout: 600s
+                access_log:
+                  - name: envoy.access_loggers.stdout
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+  clusters:
+    - name: artio
+      type: STATIC
+      connect_timeout: 1s
+      load_assignment:
+        cluster_name: artio
+        endpoints:
+          - lb_endpoints:
+              - endpoint: {address: {socket_address: {address: 127.0.0.1, port_value: 9201}}}
+"""
+
+
+def fix_tls_sidecar(v):
+    return {
+        "name": "fix-tls", "image": v["envoyImage"],
+        "args": ["-c", "/etc/envoy/envoy.yaml", "--concurrency", "1", "--log-level", "warn", "--disable-hot-restart"],
+        "ports": [{"name": "fix", "containerPort": 9200, "protocol": "TCP"}],
+        # Guaranteed QoS like the rest of the pod (hostNetwork: integer CPUs)
+        "resources": res(1, "256Mi"),
+        "readinessProbe": {"tcpSocket": {"port": 9200}, "periodSeconds": 5},
+        "securityContext": {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True, "capabilities": {"drop": ["ALL"]}},
+        "volumeMounts": [{"name": "fix-tls", "mountPath": "/etc/envoy", "readOnly": True},
+                         {"name": "tls", "mountPath": "/etc/lmb/tls", "readOnly": True}],
+    }
+
+
+def network_policies(v):
+    """Ingress allow-lists for the admin and credential ports. The gateways run on the host network, so their
+    traffic to the access directory and to the control plane's symbol directory comes from node addresses (values
+    nodeCidrs); operators reach the control plane from the operator namespaces; Prometheus scrapes from the
+    monitoring namespace. The control plane's port serves both the operators' API (operator tokens) and the
+    symbol directory (service token). The access service's
+    operators' API listens on loopback only (kubectl port-forward), whatever the policy."""
+    ns = v["namespace"]
+    mon = {"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": v["monitoringNamespace"]}}}
+    ops = [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": n}}} for n in v["operatorNamespaces"]]
+    nodes = [{"ipBlock": {"cidr": c}} for c in v["nodeCidrs"]]
+
+    def policy(name, comp, rules):
+        return {"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
+                "metadata": {"name": name, "namespace": ns},
+                "spec": {"podSelector": {"matchLabels": labels(comp)}, "policyTypes": ["Ingress"],
+                         "ingress": [{"from": frm, "ports": [{"protocol": "TCP", "port": p} for p in ports]} for frm, ports in rules]}}
+    return [
+        policy("lmb-controlplane-ingress", "controlplane", [
+            (ops + [{"podSelector": {"matchLabels": labels("controlplane")}}], [9700]),
+            (nodes + [{"podSelector": {"matchLabels": labels(c)}} for c in ("posttrade", "consolidator")], [9700]),
+            ([mon], [9710])]),
+        policy("lmb-access-ingress", "access", [
+            (nodes + [{"podSelector": {"matchLabels": labels("posttrade")}}], [9760]),
+            ([mon], [9770])]),
+    ]
 
 
 def dr_docs(site, v):

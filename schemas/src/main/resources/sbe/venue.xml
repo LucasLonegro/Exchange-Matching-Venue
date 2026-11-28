@@ -115,6 +115,7 @@
             <validValue name="FIRM_SYMBOL">3</validValue>
             <validValue name="GATEWAY">4</validValue>
             <validValue name="SYMBOL">5</validValue>
+            <validValue name="SESSION_GATEWAY">6</validValue>
         </enum>
         <enum name="LiquidityFlag" encodingType="uint8">
             <validValue name="NONE">0</validValue>
@@ -190,7 +191,7 @@
         <field name="firmId" id="4" type="uint32"/>
         <field name="symbolId" id="5" type="uint32" description="Used by FIRM_SYMBOL and SYMBOL scopes"/>
         <field name="gatewayId" id="6" type="uint16" description="Sender"/>
-        <field name="targetGatewayId" id="7" type="uint16" description="Used by GATEWAY scope"/>
+        <field name="targetGatewayId" id="7" type="uint16" description="Used by GATEWAY and SESSION_GATEWAY scopes"/>
         <field name="scope" id="8" type="MassCancelScope"/>
         <field name="reason" id="9" type="CancelReason" description="MASS_CANCEL, DISCONNECT or ADMIN"/>
     </sbe:message>

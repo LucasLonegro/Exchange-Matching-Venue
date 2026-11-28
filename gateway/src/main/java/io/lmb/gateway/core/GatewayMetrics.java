@@ -25,6 +25,9 @@ public final class GatewayMetrics
     private final CounterDataPoint slowConsumerDisconnects;
     private final CounterDataPoint cancelOnDisconnect;
     private final CounterDataPoint resendsAnsweredFromCache;
+    private final GaugeDataPoint codPending;
+    private final CounterDataPoint authFailures;
+    private final CounterDataPoint accessRevocations;
     private final GaugeDataPoint sessionsConnected;
     private final GaugeDataPoint catchupStreams;
     private final GaugeDataPoint latencyP50;
@@ -69,6 +72,13 @@ public final class GatewayMetrics
             .help("Sessions disconnected because they did not read their reports").register(registry);
         cancelOnDisconnect = Counter.builder().name("lmb_gateway_cancel_on_disconnect_total")
             .help("Cancel-on-disconnect mass cancels issued (one per shard)").register(registry);
+        codPending = Gauge.builder().name("lmb_gateway_cancel_on_disconnect_pending")
+            .help("Disconnected sessions whose cancel-on-disconnect waits for its time window").register(registry);
+        authFailures = Counter.builder().name("lmb_gateway_auth_failures_total")
+            .help("Logons and queries refused for bad or insufficient credentials").register(registry);
+        accessRevocations = Counter.builder().name("lmb_gateway_access_revocations_total")
+            .help("Connections ended because their key was revoked or expired or their session or firm disabled")
+            .register(registry);
         resendsAnsweredFromCache = Counter.builder().name("lmb_gateway_resends_from_cache_total")
             .help("Possible resends whose outcome was already known and not resubmitted").register(registry);
         sessionsConnected = Gauge.builder().name("lmb_gateway_sessions_connected")
@@ -142,6 +152,57 @@ public final class GatewayMetrics
     void cancelOnDisconnect()
     {
         cancelOnDisconnect.inc();
+    }
+
+    public long cancelOnDisconnects()
+    {
+        return (long)cancelOnDisconnect.get();
+    }
+
+    void codPending(final int n)
+    {
+        codPending.set(n);
+    }
+
+    void authFailure()
+    {
+        authFailures.inc();
+    }
+
+    /** Thread-safe (counters are). */
+    public void authFailureFromFrontEnd()
+    {
+        authFailures.inc();
+    }
+
+    public long authFailures()
+    {
+        return (long)authFailures.get();
+    }
+
+    void accessRevocation()
+    {
+        accessRevocations.inc();
+    }
+
+    public long accessRevocations()
+    {
+        return (long)accessRevocations.get();
+    }
+
+    /** Exports the access snapshot's version and age (time since the last successful poll). */
+    public void bindAccess(final io.lmb.common.access.AccessDirectorySource source)
+    {
+        final long boundMs = System.currentTimeMillis();
+        io.prometheus.metrics.core.metrics.GaugeWithCallback.builder().name("lmb_gateway_access_directory_age_seconds")
+            .help("Seconds since the access snapshot was last confirmed with the access service (since start if never)")
+            .callback(cb -> cb.call((System.currentTimeMillis() -
+                (source.lastSuccessMs.get() == 0 ? boundMs : source.lastSuccessMs.get())) / 1000.0)).register(registry);
+        io.prometheus.metrics.core.metrics.GaugeWithCallback.builder().name("lmb_gateway_access_directory_version")
+            .help("Version of the access snapshot in force (0 = none)")
+            .callback(cb -> cb.call(source.current() == null ? 0 : source.current().version())).register(registry);
+        io.prometheus.metrics.core.metrics.CounterWithCallback.builder().name("lmb_gateway_access_poll_failures")
+            .help("Failed polls of the access service").callback(cb -> cb.call(source.pollFailures.get())).register(registry);
     }
 
     void resendFromCache()

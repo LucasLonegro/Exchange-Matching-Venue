@@ -371,6 +371,17 @@ scrape_configs:
           - "pt-az-b-01.p.lmb.internal:9810"
         labels:
           instance_id: "1"
+  - job_name: "lmb-access"
+    honor_labels: true
+    static_configs:
+      - targets:
+          - "access-az-a-01.p.lmb.internal:9770"
+        labels:
+          instance_id: "0"
+      - targets:
+          - "access-az-b-01.p.lmb.internal:9770"
+        labels:
+          instance_id: "1"
   - job_name: "lmb-ledger"
     honor_labels: true
     static_configs:
@@ -448,6 +459,8 @@ scrape_configs:
   - job_name: "node-exporter"
     static_configs:
       - targets:
+          - "access-az-a-01.p.lmb.internal:9400"
+          - "access-az-b-01.p.lmb.internal:9400"
           - "cp-az-a-01.p.lmb.internal:9400"
           - "cp-az-b-01.p.lmb.internal:9400"
           - "gw-az-a-01.p.lmb.internal:9400"

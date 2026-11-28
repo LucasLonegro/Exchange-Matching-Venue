@@ -16,7 +16,9 @@ public enum Reject
     INVALID_FIELD,
     SYMBOL_NOT_TRADING,
     MAX_ORDER_SIZE,
-    DUPLICATE_SESSION;
+    DUPLICATE_SESSION,
+    /** The session's credential does not allow this request (e.g. a new order on a cancel-only key). */
+    NOT_PERMITTED;
 
     static final Reject[] VALUES = values();
 }

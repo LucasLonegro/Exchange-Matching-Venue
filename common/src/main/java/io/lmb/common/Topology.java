@@ -265,16 +265,4 @@ public final class Topology
     {
         return getInt("lmb.replayer.metricsPort", 9900);
     }
-
-    // ---- static reference data files ----
-
-    public Path symbolsFile()
-    {
-        return Path.of(get("lmb.symbols", "deploy/local/symbols.csv"));
-    }
-
-    public Path firmsFile()
-    {
-        return Path.of(get("lmb.firms", "deploy/local/firms.csv"));
-    }
 }

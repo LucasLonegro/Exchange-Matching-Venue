@@ -3,8 +3,8 @@ package io.lmb.posttrade;
 import io.lmb.api.SinkRunner;
 import io.lmb.api.VenueClients;
 import io.lmb.common.Config;
-import io.lmb.common.FirmDirectory;
-import io.lmb.common.SymbolDirectory;
+import io.lmb.common.SymbolDirectorySource;
+import io.lmb.common.access.AccessDirectorySource;
 import io.lmb.common.Topology;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -32,17 +32,32 @@ public final class PostTradeMain
         final int instance = Config.getInt("lmb.instance.id", 0);
         final Topology topology = Topology.load();
         final PostTradeConfig config = PostTradeConfig.load(topology, instance);
-        final FirmDirectory firms = FirmDirectory.load(topology.firmsFile());
-        final SymbolDirectory symbols = SymbolDirectory.load(topology.symbolsFile());
+        if (config.accessUrl == null || config.accessUrl.isBlank())
+        {
+            throw new IllegalStateException("lmb.posttrade.access.url is not set: drop copy credentials come only from the access service");
+        }
+        final AccessDirectorySource access = AccessDirectorySource.polling(config.accessUrl, config.accessToken,
+            config.accessPollMs, config.dataDir.resolve("access-directory.json"), "posttrade-" + instance).start();
+        // tickers for the drop copy: wait for a first snapshot (or the cached one) so reports never carry bare ids
+        final SymbolDirectorySource symbols = SymbolDirectorySource.fromTopology(topology,
+            config.dataDir.resolve("symbol-directory.json"), "posttrade-" + instance).start();
+        if (!symbols.awaitFirst("posttrade " + instance))
+        {
+            access.close();
+            symbols.close();
+            return;
+        }
         final VenueClients venue = VenueClients.connect(topology, "posttrade-" + instance);
         final PostTrade postTrade;
         try
         {
-            postTrade = new PostTrade(config, venue, firms, symbols).start();
+            postTrade = new PostTrade(config, venue, access, symbols).start();
         }
         catch (final Exception e)
         {
             venue.close();
+            access.close();
+            symbols.close();
             throw e;
         }
         Runtime.getRuntime().addShutdownHook(new Thread(() ->
@@ -50,6 +65,8 @@ public final class PostTradeMain
             LOG.info("posttrade {} shutting down", instance);
             postTrade.close();
             venue.close();
+            access.close();
+            symbols.close();
         }, "posttrade-shutdown"));
 
         if (awaitReadyAndAnnounce(postTrade, System.out))

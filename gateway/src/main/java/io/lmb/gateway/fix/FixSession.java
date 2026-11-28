@@ -13,6 +13,7 @@ import io.lmb.fix.builder.ExecutionReportEncoder;
 import io.lmb.fix.builder.OrderCancelRejectEncoder;
 import io.lmb.fix.builder.OrderMassCancelReportEncoder;
 import io.lmb.fix.decoder.HeaderDecoder;
+import io.lmb.fix.decoder.LogoutDecoder;
 import io.lmb.fix.decoder.NewOrderSingleDecoder;
 import io.lmb.fix.decoder.OrderCancelReplaceRequestDecoder;
 import io.lmb.fix.decoder.OrderCancelRequestDecoder;
@@ -48,6 +49,7 @@ import java.util.concurrent.TimeUnit;
  */
 final class FixSession implements SessionHandler, SessionOutlet
 {
+    private static final org.slf4j.Logger LOG = org.slf4j.LoggerFactory.getLogger(FixSession.class);
     private final GatewayCore core;
     private final Session session;
     private final MutableAsciiBuffer ascii = new MutableAsciiBuffer();
@@ -65,6 +67,8 @@ final class FixSession implements SessionHandler, SessionOutlet
     private final Long2ObjectHashMap<Character> cancelKinds = new Long2ObjectHashMap<>();
     private final Long2ObjectHashMap<Character> massTypes = new Long2ObjectHashMap<>();
     private SessionState state;
+    /** The client sent a Logout (35=5): its disconnect is a logout for CancelOnDisconnectType. */
+    private boolean logoutReceived;
     private String currentMsgType = "D";
 
     FixSession(final GatewayCore core, final Session session)
@@ -81,6 +85,12 @@ final class FixSession implements SessionHandler, SessionOutlet
         final int sequenceIndex, final long messageType, final long timestampInNs, final long position,
         final OnMessageInfo messageInfo)
     {
+        if (messageType == LogoutDecoder.MESSAGE_TYPE)
+        {
+            // a client that sends Logout and closes at once looks like REMOTE_DISCONNECT to Artio: it still logged out
+            logoutReceived = true;
+            return Action.CONTINUE;
+        }
         if (state == null || !state.isConnected())
         {
             return Action.CONTINUE;
@@ -308,7 +318,9 @@ final class FixSession implements SessionHandler, SessionOutlet
     {
         if (state != null)
         {
-            core.onTransportClosed(state, this);
+            final boolean logout = logoutReceived || reason == DisconnectReason.LOGOUT;
+            LOG.info("FIX session {} disconnected: {}{}", state.sessionId(), reason, logout ? " (logged out)" : "");
+            core.onTransportClosed(state, this, logout);
         }
         return Action.CONTINUE;
     }
@@ -494,7 +506,7 @@ final class FixSession implements SessionHandler, SessionOutlet
                 case UNKNOWN_SYMBOL -> BusinessRejectReason.UNKNOWN_SECURITY;
                 case UNAVAILABLE, SYMBOL_NOT_TRADING -> BusinessRejectReason.APPLICATION_NOT_AVAILABLE;
                 case THROTTLED -> BusinessRejectReason.THROTTLE_LIMIT_EXCEEDED;
-                case NOT_LOGGED_ON, AUTH_FAILED -> BusinessRejectReason.NOT_AUTHORIZED;
+                case NOT_LOGGED_ON, AUTH_FAILED, NOT_PERMITTED -> BusinessRejectReason.NOT_AUTHORIZED;
                 default -> BusinessRejectReason.OTHER;
             })
             .text(reason.name() + (text == null ? "" : ": " + text));

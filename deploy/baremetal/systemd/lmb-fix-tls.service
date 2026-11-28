@@ -1,0 +1,20 @@
+# TLS termination for the gateway's FIX port on this host (deploy/baremetal/envoy/fix-tls.yaml).
+# Enable on gateway hosts only:  systemctl enable --now lmb-fix-tls.service
+[Unit]
+Description=LMB FIX TLS proxy (Envoy) for the local gateway
+After=network-online.target
+Wants=network-online.target
+PartOf=lmb.target
+
+[Service]
+Type=simple
+User=lmb
+ExecStart=/usr/local/bin/envoy -c /opt/lmb/deploy/baremetal/envoy/fix-tls.yaml --log-path /var/log/lmb/fix-tls.log --concurrency 1 --disable-hot-restart
+Restart=always
+RestartSec=2
+# off the gateway's pinned cores
+CPUAffinity=0
+LimitNOFILE=65536
+
+[Install]
+WantedBy=lmb.target

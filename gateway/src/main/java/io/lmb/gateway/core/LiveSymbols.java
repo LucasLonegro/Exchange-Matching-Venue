@@ -9,22 +9,17 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * The gateway's symbol directory: seeded from the CSV ({@link SymbolDirectory}) and updated from the
- * {@code SymbolDefined} events of every shard's stream, so symbols added or changed through the control plane
- * (which only reach the shards) become routable without a gateway restart. Core thread only.
- * (Integration fix: before, the gateway only knew the CSV and refused control-plane symbols as UNKNOWN_SYMBOL.)
+ * The gateway's routing table of symbols: filled from the control plane's symbol snapshot (GatewayCore applies
+ * each new one) and from the {@code SymbolDefined} events of every shard's stream, so symbols added or changed
+ * through the control plane become routable without a gateway restart. Core thread only.
  */
 public final class LiveSymbols
 {
     private final Map<String, SymbolDirectory.Symbol> byTicker = new HashMap<>();
     private final Map<Integer, SymbolDirectory.Symbol> byId = new LinkedHashMap<>();
 
-    public LiveSymbols(final SymbolDirectory seed)
+    public LiveSymbols()
     {
-        for (final SymbolDirectory.Symbol s : seed.all())
-        {
-            put(s);
-        }
     }
 
     public SymbolDirectory.Symbol byTicker(final String ticker)

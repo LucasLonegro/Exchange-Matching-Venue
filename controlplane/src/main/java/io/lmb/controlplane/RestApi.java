@@ -1,5 +1,7 @@
 package io.lmb.controlplane;
 
+import io.lmb.common.Json;
+import io.lmb.common.access.OperatorTokens;
 import io.javalin.Javalin;
 import io.javalin.http.Context;
 import io.lmb.common.SymbolDirectory;
@@ -37,6 +39,7 @@ public final class RestApi
     private final ControlPlaneConfig cfg;
     private final Database db;
     private final int shardCount;
+    private final OperatorTokens operators;
     private final Clock clock;
     private final Metrics metrics;
     private LeaderLease lease;
@@ -56,6 +59,7 @@ public final class RestApi
     public RestApi(final ControlPlaneConfig cfg, final Database db, final int shardCount, final Clock clock, final Metrics metrics)
     {
         this.cfg = cfg;
+        this.operators = cfg.operatorsFile != null ? OperatorTokens.load(cfg.operatorsFile) : OperatorTokens.single(cfg.adminToken);
         this.db = db;
         this.shardCount = shardCount;
         this.clock = clock;
@@ -78,6 +82,7 @@ public final class RestApi
             config.routes.before("/api/*", this::authenticate);
 
             config.routes.get("/health", ctx -> json(ctx, 200, health()));
+            config.routes.get("/internal/v1/symbols", this::internalSymbols);
             config.routes.get("/api/status", ctx -> json(ctx, 200, status()));
 
             config.routes.get("/api/symbols", ctx -> json(ctx, 200, symbols(null)));
@@ -103,6 +108,7 @@ public final class RestApi
 
             config.routes.get("/api/firms", ctx -> json(ctx, 200, firms(null)));
             config.routes.get("/api/firms/{id}", ctx -> json(ctx, 200, firms(intParam(ctx, "id")).get(0)));
+            config.routes.post("/api/firms", ctx -> submit(ctx, "CREATE_FIRM", validNewFirm(body(ctx))));
             config.routes.get("/api/limits", ctx -> json(ctx, 200, limits()));
             config.routes.put("/api/firms/{id}/limits", ctx -> submit(ctx, "UPDATE_LIMITS", validLimits(intParam(ctx, "id"), body(ctx))));
             config.routes.post("/api/firms/{id}/kill", ctx -> submit(ctx, "KILL_FIRM",
@@ -149,10 +155,49 @@ public final class RestApi
         {
             token = auth.substring(7).trim();
         }
-        if (token == null || !MessageDigest.isEqual(token.getBytes(StandardCharsets.UTF_8), cfg.adminToken.getBytes(StandardCharsets.UTF_8)))
+        final String operator = operators.operator(token);
+        if (operator == null)
         {
             throw new ApiException(401, "missing or invalid admin token");
         }
+        ctx.attribute("operator", operator);
+    }
+
+    /**
+     * The symbol snapshot of the other services (gateways, post-trade, feeds; {@code SymbolDirectorySource}): every
+     * ACTIVE symbol with its desired parameters (referencePrice is the listing price), versioned by content so
+     * both instances give the same ETag. Needs the service token, not an operator token.
+     */
+    private void internalSymbols(final Context ctx)
+    {
+        final String auth = ctx.header("Authorization");
+        final String token = auth != null && auth.startsWith("Bearer ") ? auth.substring(7).trim() : null;
+        if (token == null || !MessageDigest.isEqual(token.getBytes(StandardCharsets.UTF_8),
+            cfg.serviceToken.getBytes(StandardCharsets.UTF_8)))
+        {
+            throw new ApiException(401, "missing or invalid service token");
+        }
+        final List<SymbolDirectory.Symbol> list = db.read(c ->
+        {
+            final List<SymbolDirectory.Symbol> out = new ArrayList<>();
+            for (final Store.SymbolRow r : Store.symbols(c))
+            {
+                if (r.active())
+                {
+                    out.add(new SymbolDirectory.Symbol(r.symbolId(), r.ticker(), r.shardId(), r.tickSize(), r.lotSize(),
+                        r.referencePrice(), r.priceBandBps(), r.maxOrderQty(), r.dynamicBandBps(), r.volatilityAuctionNs()));
+                }
+            }
+            return out;
+        });
+        final String etag = "\"" + SymbolDirectory.contentVersion(list) + "\"";
+        ctx.header("ETag", etag);
+        if (etag.equals(ctx.header("If-None-Match")))
+        {
+            ctx.status(304);
+            return;
+        }
+        ctx.status(200).contentType("application/json").result(SymbolDirectory.toJson(list));
     }
 
     private static void json(final Context ctx, final int status, final Object body)
@@ -174,7 +219,11 @@ public final class RestApi
 
     private void submit(final Context ctx, final String action, final Map<String, Object> params) throws InterruptedException
     {
-        final String actor = ctx.header("X-LMB-Actor") == null ? "anonymous" : ctx.header("X-LMB-Actor");
+        // per-operator tokens: the actor is the token's owner. The single shared token has no owner, so there the
+        // caller may name themselves with X-LMB-Actor (local setups only)
+        final String operator = ctx.attribute("operator");
+        final String named = ctx.header("X-LMB-Actor");
+        final String actor = cfg.operatorsFile != null || named == null ? operator : named;
         if (!ACTOR.matcher(actor).matches())
         {
             throw new ApiException(400, "invalid X-LMB-Actor header");
@@ -376,6 +425,22 @@ public final class RestApi
         return p;
     }
 
+    private static Map<String, Object> validNewFirm(final Map<String, Object> b)
+    {
+        final Map<String, Object> p = new LinkedHashMap<>();
+        p.put("firmId", rangeLong("firmId", b.get("firmId"), 1, 0xFFFF_FFFEL));
+        final Object name = b.get("name");
+        if (name == null || name.toString().isBlank() || name.toString().length() > 200 ||
+            name.toString().chars().anyMatch(Character::isISOControl))
+        {
+            throw new ApiException(400, "name must be 1..200 printable characters");
+        }
+        p.put("name", name.toString().strip());
+        p.put("creditLimit", rangeLong("creditLimit", b.get("creditLimit"), 0, Long.MAX_VALUE / 4));
+        p.put("maxPositionPerSymbol", rangeLong("maxPositionPerSymbol", b.get("maxPositionPerSymbol"), 0, Long.MAX_VALUE / 4));
+        return p;
+    }
+
     private Map<String, Object> validMassCancel(final Map<String, Object> b)
     {
         final Map<String, Object> p = new LinkedHashMap<>();
@@ -385,7 +450,7 @@ public final class RestApi
             throw new ApiException(400, "scope is required (FIRM, SESSION, SYMBOL, FIRM_SYMBOL)");
         }
         p.put("scope", scope);
-        if (scope.startsWith("FIRM"))
+        if (scope.startsWith("FIRM") || scope.equals("SESSION"))
         {
             p.put("firmId", rangeLong("firmId", b.get("firmId"), 0, 0xFFFF_FFFEL));
         }
@@ -550,9 +615,7 @@ public final class RestApi
                 final Map<String, Object> m = new LinkedHashMap<>();
                 m.put("firmId", f.firmId());
                 m.put("name", f.name());
-                m.put("apiKey", f.apiKey().length() <= 2 ? "**" : f.apiKey().substring(0, 2) + "***");
                 m.put("enabled", f.enabled());
-                m.put("sessionIds", f.sessionIds());
                 m.put("creditLimit", f.creditLimit());
                 m.put("maxPositionPerSymbol", f.maxPositionPerSymbol());
                 out.add(m);
