@@ -8,7 +8,7 @@ import io.lmb.fix.LastLiquidityInd;
 import io.lmb.fix.builder.ExecutionReportEncoder;
 import io.lmb.posttrade.CursorFile;
 import io.lmb.posttrade.PostTradeMetrics;
-import io.lmb.posttrade.PostTradeSink;
+import io.lmb.api.PostTradeSink;
 import io.lmb.sbe.ExecType;
 import io.lmb.sbe.ExecutionReportDecoder;
 import io.lmb.sbe.MessageHeaderDecoder;

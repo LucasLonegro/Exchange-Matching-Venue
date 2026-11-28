@@ -1,5 +1,7 @@
 package io.lmb.posttrade;
 
+import io.lmb.api.PostTradeSink;
+import io.lmb.api.SinkRunner;
 import io.lmb.posttrade.store.SchemaMigrator;
 import io.lmb.posttrade.store.TradeStore;
 import io.lmb.sbe.TradeDecoder;

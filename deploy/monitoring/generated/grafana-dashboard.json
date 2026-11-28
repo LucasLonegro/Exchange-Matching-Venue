@@ -768,22 +768,9 @@
       ]
     },
     {
-      "type": "row",
-      "title": "Feeds, control plane, time",
-      "id": 25,
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 77
-      },
-      "panels": []
-    },
-    {
       "type": "timeseries",
-      "title": "Feed gap ratio",
-      "id": 26,
+      "title": "Ledger lag",
+      "id": 25,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -792,7 +779,54 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 78
+        "y": 77
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "lmb:ledger_lag_events",
+          "legendFormat": "shard {{shard}}"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Feeds, control plane, time",
+      "id": 26,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 85
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Feed gap ratio",
+      "id": 27,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 86
       },
       "fieldConfig": {
         "defaults": {
@@ -817,7 +851,7 @@
     {
       "type": "timeseries",
       "title": "Stale venues",
-      "id": 27,
+      "id": 28,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -826,7 +860,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 78
+        "y": 86
       },
       "fieldConfig": {
         "defaults": {
@@ -851,7 +885,7 @@
     {
       "type": "timeseries",
       "title": "Control plane lock holders",
-      "id": 28,
+      "id": 29,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -860,7 +894,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 86
+        "y": 94
       },
       "fieldConfig": {
         "defaults": {
@@ -885,7 +919,7 @@
     {
       "type": "timeseries",
       "title": "PTP offset |abs|",
-      "id": 29,
+      "id": 30,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -894,7 +928,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 86
+        "y": 94
       },
       "fieldConfig": {
         "defaults": {
@@ -919,7 +953,7 @@
     {
       "type": "timeseries",
       "title": "Targets up",
-      "id": 30,
+      "id": 31,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -928,7 +962,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 94
+        "y": 102
       },
       "fieldConfig": {
         "defaults": {

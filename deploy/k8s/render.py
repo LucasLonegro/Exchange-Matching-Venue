@@ -7,9 +7,10 @@
 Inputs: deploy/prod/site.json (shards, members, zones) and deploy/k8s/values-prod.json.
 Outputs (rendered/): 00-base.yaml (namespace, priority class, storage class, topology ConfigMap),
 10-shards.yaml (per shard: headless Service, StatefulSet, PodDisruptionBudget), 20-services.yaml
-(gateways, market data, consolidators, control plane, post-trade, replayers), 30-dr-backup.yaml
+(gateways, market data, consolidators, control plane, post-trade, ledger, replayers), 30-dr-backup.yaml
 (for the DR region's cluster). Secrets are not rendered: create `lmb-secrets` (keys cluster-secret,
-db-url, db-user, db-password, admin-token) with your secret manager.
+db-url, db-user, db-password, ledger-db-url, ledger-db-user, ledger-db-password, admin-token) with your
+secret manager.
 
 Design notes (docs/operations.md 2.3): one StatefulSet per shard, 3 replicas spread one per zone,
 hostNetwork for the latency path, Guaranteed QoS with integer CPUs, local NVMe PVs, the Aeron C driver
@@ -69,7 +70,8 @@ def topology(site, v):
     for i in range(2):
         lines += [f"lmb.controlplane.{i}.host={svc_dns(f'lmb-controlplane-{i}', 'lmb-controlplane', v)}",
                   f"lmb.controlplane.{i}.restPort=9700", f"lmb.controlplane.{i}.metricsPort=9710"]
-    lines += ["lmb.posttrade.dropCopyFixPort=9800", "lmb.posttrade.metricsPort=9810", "lmb.replayer.metricsPort=9900",
+    lines += ["lmb.posttrade.dropCopyFixPort=9800", "lmb.posttrade.metricsPort=9810", "lmb.ledger.metricsPort=9820",
+              "lmb.replayer.metricsPort=9900",
               "lmb.feedsim.instances=0",
               "lmb.symbols=/etc/lmb/refdata/symbols.csv", "lmb.firms=/etc/lmb/refdata/firms.csv"]
     return "\n".join(lines) + "\n"
@@ -284,6 +286,8 @@ def service_docs(site, v):
         ("consolidator", v["consolidator"]["replicas"], [("metrics", 9600, "TCP")], 9600, True),
         ("controlplane", v["controlplane"]["replicas"], [("rest", 9700, "TCP"), ("metrics", 9710, "TCP")], 9710, False),
         ("posttrade", v["posttrade"]["replicas"], [("dropcopy", 9800, "TCP"), ("metrics", 9810, "TCP")], 9810, False),
+        # exactly one ledger: it is the only writer of its tables
+        ("ledger", 1, [("metrics", 9820, "TCP")], 9820, False),
         ("replayer", site["shards"], [("metrics", 9900, "TCP")], 9900, False),
     ]
     for comp, replicas, ports, mport, ext_driver in specs:
@@ -303,6 +307,10 @@ def service_docs(site, v):
             c["env"] += [{"name": k, "valueFrom": {"secretKeyRef": {"name": v["secretName"], "key": key}}}
                          for k, key in (("LMB_DB_URL", "db-url"), ("LMB_DB_USER", "db-user"), ("LMB_DB_PASSWORD", "db-password"),
                                         ("LMB_CONTROLPLANE_ADMINTOKEN", "admin-token"))]
+        if comp == "ledger":
+            c["env"] += [{"name": k, "valueFrom": {"secretKeyRef": {"name": v["secretName"], "key": key}}}
+                         for k, key in (("LMB_LEDGER_DB_URL", "ledger-db-url"), ("LMB_LEDGER_DB_USER", "ledger-db-user"),
+                                        ("LMB_LEDGER_DB_PASSWORD", "ledger-db-password"))]
         if comp == "replayer":
             c["env"].append({"name": "LMB_REPLAYER_METRICSPORT", "value": "9900"})
         vols = [{"name": "shm", "emptyDir": {"medium": "Memory", "sizeLimit": "2Gi"}}]

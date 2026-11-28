@@ -99,6 +99,9 @@ class Topo:
         for i in range(self.i("lmb.posttrade.instances", 1)):
             t.append((f"posttrade-{i}", "lmb-posttrade", self.get(f"lmb.posttrade.{i}.host", "127.0.0.1"),
                       self.i("lmb.posttrade.metricsPort", 9810), {"instance_id": str(i)}))
+        for i in range(self.i("lmb.ledger.instances", 1)):
+            t.append((f"ledger-{i}", "lmb-ledger", self.get(f"lmb.ledger.{i}.host", "127.0.0.1"),
+                      self.i("lmb.ledger.metricsPort", 9820) + i, {"instance_id": str(i)}))
         rbase = self.i("lmb.replayer.metricsPort", 9900)
         for s in range(self.shards()):
             # one replayer per shard; local runs pass -Dlmb.replayer.metricsPort=base+shard
@@ -215,8 +218,18 @@ def recording_rules(n):
         rec("lmb:replay_divergence:increase5m", f"sum by ({sl}) (increase({n['REPLAYER_DIVERGENCE_TOTAL']}[5m]))")
     if n.get("REPLAYER_LAG_EVENTS"):
         rec("lmb:replayer_lag_events", f"max by ({sl}) ({n['REPLAYER_LAG_EVENTS']})")
-    if n.get("POSTTRADE_SINK_LAG_EVENTS"):
-        rec("lmb:posttrade_sink_lag_events", f"max by (sink, {sl}) ({n['POSTTRADE_SINK_LAG_EVENTS']})")
+    if n.get("POSTTRADE_LAST_EVENT_SEQ") and n.get("CLUSTER_LAST_EVENT_SEQ"):
+        rec("lmb:posttrade_sink_lag_events", f"max by ({sl}) ({n['CLUSTER_LAST_EVENT_SEQ']}) - on ({sl}) group_right "
+            f"max by (sink, {sl}) ({n['POSTTRADE_LAST_EVENT_SEQ']})")
+    if n.get("LEDGER_LAST_EVENT_SEQ") and n.get("CLUSTER_LAST_EVENT_SEQ"):
+        rec("lmb:ledger_lag_events", f"max by ({sl}) ({n['CLUSTER_LAST_EVENT_SEQ']}) - on ({sl}) "
+            f"max by ({sl}) ({n['LEDGER_LAST_EVENT_SEQ']})")
+    if n.get("LEDGER_RESTARTS_TOTAL"):
+        rec("lmb:ledger_restarts:increase15m", f"sum (increase({n['LEDGER_RESTARTS_TOTAL']}[15m]))")
+    if n.get("LEDGER_UP"):
+        rec("lmb:ledger_up", f"max ({n['LEDGER_UP']})")
+    if n.get("LEDGER_PENDING_STATEMENT_DATES"):
+        rec("lmb:ledger_pending_statement_dates", f"max ({n['LEDGER_PENDING_STATEMENT_DATES']})")
     if n.get("CONTROLPLANE_LOCK_HELD"):
         rec("lmb:controlplane_lock_holders", f"sum ({n['CONTROLPLANE_LOCK_HELD']})")
     if n.get("PTP_OFFSET"):
@@ -308,6 +321,18 @@ def alerts(slo, recorded, profile):
     if slo.get("SINK_LAG_EVENTS"):
         alert("LmbPostTradeSinkLag", f"lmb:posttrade_sink_lag_events > {slo['SINK_LAG_EVENTS']}", "5m", "warning",
               "Post-trade sink {{ $labels.sink }} behind on shard {{ $labels.shard }}", ["lmb:posttrade_sink_lag_events"])
+    if slo.get("LEDGER_LAG_EVENTS"):
+        alert("LmbLedgerLag", f"lmb:ledger_lag_events > {slo['LEDGER_LAG_EVENTS']}", "5m", "warning",
+              "Ledger {{ $value }} events behind on shard {{ $labels.shard }} (positions and statements stale)",
+              ["lmb:ledger_lag_events"])
+    alert("LmbLedgerRestarting", f"lmb:ledger_restarts:increase15m > {slo.get('LEDGER_RESTARTS_15M', '3')}", "0m", "warning",
+          "Ledger restarted {{ $value }} times in 15m: database down, or stuck on an event it cannot apply (see its log)",
+          ["lmb:ledger_restarts:increase15m"])
+    alert("LmbLedgerNotOpen", "lmb:ledger_up == 0", slo.get("LEDGER_DOWN_FOR", "5m"), "warning",
+          "Ledger process is up but its sink is not open (restart backoff loop)", ["lmb:ledger_up"])
+    alert("LmbLedgerStatementsLate", "lmb:ledger_pending_statement_dates > 0", slo.get("LEDGER_STATEMENTS_LATE_FOR", "30m"),
+          "warning", "{{ $value }} trading date(s) ended on some shards but not all: daily statements not written",
+          ["lmb:ledger_pending_statement_dates"])
     alert("LmbControlPlaneLockHolders", "lmb:controlplane_lock_holders != 1", "1m", "page",
           "{{ $value }} control plane instances hold the scheduler lock (want exactly 1)", ["lmb:controlplane_lock_holders"])
     rules.append({"alert": "LmbTargetDown", "expr": 'up{job=~"lmb-.*"} == 0', "for": slo.get("TARGET_DOWN_FOR", "1m"),
@@ -388,6 +413,7 @@ def dashboard(recorded):
     ts("Replayer lag", [("lmb:replayer_lag_events", "shard {{shard}}")], "short")
     ts("Event seq spread across members", [("lmb:event_seq_spread{" + sh + "}", "shard {{shard}}")], "short")
     ts("Post-trade sink lag", [("lmb:posttrade_sink_lag_events", "{{sink}} shard {{shard}}")], "short")
+    ts("Ledger lag", [("lmb:ledger_lag_events", "shard {{shard}}")], "short")
     end_row()
     row("Feeds, control plane, time")
     ts("Feed gap ratio", [("lmb:feed_gap_ratio:rate5m", "{{venue}}")], "percentunit")

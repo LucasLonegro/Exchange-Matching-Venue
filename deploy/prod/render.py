@@ -57,6 +57,8 @@ def build(site, region_key):
     lines += [f"lmb.controlplane.{i}.host=cp-{zones[i]}-01.{dom}" for i in range(2)]
     lines += ["# lmb.posttrade.instances / .<i>.host are not Topology keys yet (contract change request 2)",
               "lmb.posttrade.instances=2"] + [f"lmb.posttrade.{i}.host=pt-{zones[i]}-01.{dom}" for i in range(2)]
+    lines += ["# exactly one ledger (the only writer of its tables); lmb.ledger.instances / .0.host are monitoring keys",
+              "lmb.ledger.instances=1", f"lmb.ledger.0.host=ledger-{zones[0]}-01.{dom}"]
     lines += ["", f"# ---- shadow replayers (one per shard) in {zones[-1]}; not Topology keys (monitoring only) ----"]
     lines += [f"lmb.replayer.{s}.host=rp-{zones[-1]}-{s // 8 + 1:02d}.{dom}" for s in range(shards)]
     lines += [f"lmb.replayer.{s}.metricsPort={9900 + s}" for s in range(shards)]

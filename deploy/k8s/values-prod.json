@@ -21,6 +21,7 @@
   "consolidator": {"replicas": 2, "pool": "edge", "cpu": 4, "memory": "8Gi", "heap": "4g", "driverCpu": 2, "hostNetwork": true, "zone": "leader"},
   "controlplane": {"replicas": 2, "pool": "general", "cpu": 2, "memory": "4Gi", "heap": "2g", "hostNetwork": false, "zone": "spread"},
   "posttrade":    {"replicas": 2, "pool": "general", "cpu": 4, "memory": "8Gi", "heap": "4g", "storage": "100Gi", "storageClass": "standard-ssd", "hostNetwork": false, "zone": "spread"},
+  "ledger":       {"pool": "general", "cpu": 2, "memory": "4Gi", "heap": "2g", "storage": "50Gi", "storageClass": "standard-ssd", "hostNetwork": false, "zone": "spread"},
   "replayer":     {"pool": "general", "cpu": 2, "memory": "8Gi", "heap": "4g", "hostNetwork": false, "zone": "last"},
   "backup":       {"pool": "dr", "cpu": 2, "memory": "8Gi", "heap": "2g", "storage": "1700Gi", "hostNetwork": true}
 }

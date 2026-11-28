@@ -46,6 +46,7 @@ detached, with its log in `data/local/logs/<name>.log` and pid in `data/local/pi
 | marketdata | `marketdata-0` (feed A), `marketdata-1` (feed B) | |
 | gateways | `gateway-0/1` | `LMB_READY gateway <id>` (after the event streams caught up) |
 | posttrade | `posttrade-0` | |
+| ledger | `ledger-0` | `LMB_READY ledger 0` (caught up with every shard) |
 | replayers | `replayer-<shard>` | |
 
 Each tier is started in parallel and must print its `LMB_READY` line within `--timeout` (120 s). If a
@@ -54,8 +55,8 @@ started and exits 1 (`--keep-on-failure` leaves the system up for inspection). S
 is not in the distribution yet are **skipped with a warning** (modules land at different times); a
 missing `ClusterNodeMain` is fatal.
 
-The default profile is 16 JVMs. Heaps are small (node 160 MB, control plane 128 MB, gateway, market data,
-post-trade and replayer 96 MB, consolidator and simulator 64 MB) and `deploy/local/common.env` caps
+The default profile is 14 JVMs. Heaps are small (node 160 MB, control plane 128 MB, gateway, market data,
+post-trade, ledger and replayer 96 MB, consolidator and simulator 64 MB) and `deploy/local/common.env` caps
 metaspace, code cache, direct memory and thread stacks, so the worst case is about 3 GB RSS and the
 typical figure is lower; the pre-flight check compares the estimate with `MemAvailable` and refuses to
 start above it (`--force` overrides). Aeron runs in SHARED threading with backoff idle strategies and
@@ -65,10 +66,10 @@ start above it (`--force` overrides). Aeron runs in SHARED threading with backof
 
 | Need | Command |
 |---|---|
-| Minimal (1 shard x 1 member, one of each, no post-trade; 7 JVMs) | `scripts/local-up.sh --minimal` |
+| Minimal (1 shard x 1 member, one of each, no post-trade or ledger; 7 JVMs) | `scripts/local-up.sh --minimal` |
 | One shard, otherwise default | `scripts/local-up.sh --shards 1` (symbols are spread over the shards) |
 | Failover drills (3 members tolerate one failure) | `scripts/local-up.sh --members 3` |
-| Without some services | `--no-posttrade --no-replayer --no-feedsim --skip marketdata` |
+| Without some services | `--no-posttrade --no-ledger --no-replayer --no-feedsim --skip marketdata` |
 | With PostgreSQL, Redpanda, ClickHouse, MinIO, Prometheus, Grafana, Envoy | `docker compose -f deploy/local/docker-compose.yml up -d` then `scripts/local-up.sh --full` |
 | See exactly what would run | `scripts/local-up.sh --dry-run` (prints the generated topology and every resolved command line) |
 | Relaunch one process | `scripts/local-up.sh --restart gateway-1` |
@@ -96,7 +97,7 @@ To add configuration the scripts do not know about, without editing them (later 
 
 1. `deploy/local/common.env` (all processes), 2. `deploy/local/full.env` (only with `--full`),
 3. `deploy/local/<service>.env` (`node`, `gateway`, `marketdata`, `consolidator`, `feedsim`,
-`controlplane`, `posttrade`, `replayer`), 4. `deploy/local/<name>.env` (`node-0-1.env`, `gateway-1.env`),
+`controlplane`, `posttrade`, `ledger`, `replayer`), 4. `deploy/local/<name>.env` (`node-0-1.env`, `gateway-1.env`),
 5. command line: `--env gateway:LMB_GATEWAY_THROTTLE_RATEPERSEC=5000`, `--jvm node-0-0:-Dlmb.cluster.idle=noop`,
 `--heap node=256m`.
 
@@ -114,6 +115,7 @@ tomorrow already works. `LMB_HEAP`, `LMB_JAVA_OPTS` (append: `LMB_JAVA_OPTS="$LM
 | Consolidator metrics, feed simulator metrics | 9600+i, 9650 |
 | Control plane admin REST / metrics | 9700+i / 9710+i (header `X-LMB-Admin-Token`, default token `lmb-local-admin`) |
 | Post-trade drop copy FIX / metrics | 9800 / 9810 |
+| Ledger metrics | 9820 |
 | Replayer metrics | 9900 + shard (local workaround, see section 10) |
 | Node ports (UDP, Aeron) | 20000 + 1000*shard + 100*member + offset; metrics on offset 9 |
 | With the compose profile | Prometheus :9090, Grafana :3000, Envoy REST :8080 (admin :15000), PostgreSQL :5432, Redpanda :19092, ClickHouse :8123, MinIO :9002 (console :9003) |
@@ -285,7 +287,9 @@ cp() { curl -fsS -H "X-LMB-Admin-Token: $LMB_ADMIN_TOKEN" -H "X-LMB-Actor: $USER
 
 1. The scheduler runs the closing auction and moves symbols to CLOSED (resting orders expire,
    `END_OF_DAY`).
-2. Wait for post-trade sink lag 0 on every sink and shard (drop copy, Kafka, WORM, ClickHouse).
+2. Wait for post-trade sink lag 0 on every sink and shard (drop copy, Kafka, WORM, ClickHouse). After the
+   DayRollover below, the ledger writes the day's statements once every shard has rolled
+   (`ledger_statement_day`, `<statementsDir>/<yyyymmdd>/`).
 3. Reconcile: trade count and notional per shard from the event stream = ClickHouse = clearing file;
    drop-copy sequence complete per firm.
 4. Take a snapshot on every shard (Aeron `ClusterTool <cluster-dir> snapshot` on the leader, or the

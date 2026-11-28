@@ -9,6 +9,7 @@ service either sends commands into a shard's log or reads its event stream.
 participants -> gateways -> [ Raft log -> risk + matcher -> event stream ] -> gateways (exec reports)
                                ^      (one shard, Aeron Cluster)        |-> market data publishers
  feed handlers -> NBBO consolidator                                     |-> post-trade (drop copy, Kafka, archive)
+                                                                        |-> ledger (positions, PnL, daily statements)
  control plane (reference data, schedule, risk limits)                  +-> shadow replayer (verifies the log)
 ```
 
@@ -41,7 +42,7 @@ scripts/local-logs.sh gateway-0 -f    # follow one process's log
 scripts/local-down.sh                 # stop everything (add --wipe to delete data/local)
 ```
 
-The default local profile has 13 JVMs, with two of everything that replicates:
+The default local profile has 14 JVMs, with two of everything that replicates:
 
 | Process | Count |
 |---|---|
@@ -50,6 +51,7 @@ The default local profile has 13 JVMs, with two of everything that replicates:
 | Market data publishers (feeds A and B) | 2 |
 | Control plane | 2 |
 | Post-trade | 1 |
+| Ledger | 1 |
 | Shadow replayer | 1 per shard |
 
 Variants:
@@ -67,6 +69,7 @@ Main local endpoints:
 | Market data | retransmit `9500+i`, gRPC `9510+i`, metrics `9520+i` |
 | Control plane | admin REST `9700+i` (header `X-LMB-Admin-Token: lmb-local-admin`), metrics `9710+i` |
 | Post-trade | drop copy FIX `9800`, metrics `9810` |
+| Ledger | metrics `9820`; daily statements in `data/local/ledger/0/statements` |
 | Replayer | metrics `9900+shard` |
 
 `i` is the instance number. Logs are in `data/local/logs/<name>.log`.
@@ -95,6 +98,7 @@ scripts/load-test.sh                  # latency percentiles at 1000 orders/s for
 | `feeds/` | Feed handler SPI, simulated external venues, NBBO consolidator (not started by default: the venue sets its own reference prices; `--consolidators N --with-feedsim`) |
 | `controlplane/` | Reference data, limits, admin REST, scheduler, risk-budget allocator |
 | `posttrade/` | FIX drop copy, Kafka bridge, WORM archiver, ClickHouse loader |
+| `ledger/` | Cash, positions, average cost, PnL, nightly marks at the official close, daily statements |
 | `replayer/` | Shadow replayer (re-runs the log and compares hashes), backtester, log verifier |
 | `tools/` | Smoke test, load generator, CLI clients |
 | `dist/` | Collects every jar; `scripts/lmb-run <main-class>` runs a service from it |

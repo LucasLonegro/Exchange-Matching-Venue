@@ -1,5 +1,6 @@
 package io.lmb.posttrade;
 
+import io.lmb.api.SinkRunner;
 import io.prometheus.metrics.core.metrics.CounterWithCallback;
 import io.prometheus.metrics.core.metrics.GaugeWithCallback;
 import io.prometheus.metrics.model.registry.PrometheusRegistry;

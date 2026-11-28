@@ -371,6 +371,13 @@ scrape_configs:
           - "pt-az-b-01.p.lmb.internal:9810"
         labels:
           instance_id: "1"
+  - job_name: "lmb-ledger"
+    honor_labels: true
+    static_configs:
+      - targets:
+          - "ledger-az-a-01.p.lmb.internal:9820"
+        labels:
+          instance_id: "0"
   - job_name: "lmb-replayer"
     honor_labels: true
     static_configs:
@@ -447,6 +454,7 @@ scrape_configs:
           - "gw-az-a-02.p.lmb.internal:9400"
           - "gw-az-a-03.p.lmb.internal:9400"
           - "gw-az-a-04.p.lmb.internal:9400"
+          - "ledger-az-a-01.p.lmb.internal:9400"
           - "md-az-a-a.p.lmb.internal:9400"
           - "md-az-a-b.p.lmb.internal:9400"
           - "mx-az-a-01.p.lmb.internal:9400"
