@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""Seeds a local venue through its APIs: symbols and risk accounts (control plane), teams with their members'
+sessions and API keys (access service). Idempotent: what already exists is left alone, and a session whose key
+is not in the credentials file gets a new key. scripts/local-up.sh runs it once the control plane and the access
+service are up, before the gateways.
+
+  scripts/local-seed --controlplane http://127.0.0.1:9700 --access http://127.0.0.1:9750 \\
+                     --shards 2 --credentials data/local/credentials.json
+
+The credentials file is how a local run hands the issued keys to its tools (SmokeTestMain, LoadGeneratorMain:
+topology key lmb.tools.credentials). Keys are shown once by the access service and only their hashes are kept
+there, so this file is the only copy: it lives in the data directory and goes away with local-down.sh --wipe.
+
+  {"sessions": [{"sessionId": 1001, "firmId": 100, "apiKey": "lmb_..."}, ...],
+   "dropCopy": [{"firmId": 100, "apiKey": "lmb_..."}, ...]}
+
+Environment: LMB_CONTROLPLANE_TOKEN, LMB_ACCESS_TOKEN (operator tokens; local default lmb-local-admin).
+"""
+import argparse
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+
+# symbolId, ticker, listing price (cents): spread round-robin over the shards. Tick 1, lot 1, 10% band.
+SYMBOLS = [(1, "AAPL", 19000), (2, "MSFT", 42000), (3, "AMZN", 18500), (4, "NVDA", 12000),
+           (5, "GOOG", 17000), (6, "META", 50000), (7, "TSLA", 25000), (8, "JPM", 20000)]
+# firmId, name, credit limit (cents), max position per symbol (shares), sessions
+FIRMS = [(100, "Alpha Capital", 10_000_000_000_000_000, 5_000_000, [1001, 1002]),
+         (200, "Beta Trading", 10_000_000_000_000_000, 5_000_000, [2001, 2002]),
+         (300, "Gamma Markets", 10_000_000_000_000_000, 2_000_000, [3001])]
+
+
+def call(base, token, method, path, body=None, ok=(200, 201, 202)):
+    data = None if body is None else json.dumps(body).encode()
+    req = urllib.request.Request(base + path, data=data, method=method,
+                                 headers={"Authorization": "Bearer " + token, "Content-Type": "application/json",
+                                          "X-LMB-Actor": "local-seed"})
+    for attempt in range(30):
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                text = r.read().decode()
+                return r.status, (json.loads(text) if text else None)
+        except urllib.error.HTTPError as e:
+            text = e.read().decode()
+            if e.code in ok:
+                return e.code, (json.loads(text) if text else None)
+            try:
+                msg = json.loads(text).get("error") or text
+            except ValueError:
+                msg = text
+            sys.exit(f"local-seed: {method} {base}{path}: HTTP {e.code}: {msg}")
+        except urllib.error.URLError as e:
+            if attempt == 29:
+                sys.exit(f"local-seed: cannot reach {base}: {e.reason}")
+            time.sleep(1)
+
+
+def main():
+    p = argparse.ArgumentParser(prog="local-seed", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--controlplane", required=True, help="control plane REST base URL")
+    p.add_argument("--access", help="access service operator API base URL (omit: symbols and risk accounts only)")
+    p.add_argument("--shards", type=int, required=True)
+    p.add_argument("--credentials", required=True, help="the credentials file to write")
+    a = p.parse_args()
+    cp_tok = os.environ.get("LMB_CONTROLPLANE_TOKEN", "lmb-local-admin")
+    ac_tok = os.environ.get("LMB_ACCESS_TOKEN", "lmb-local-admin")
+    cp, acc = a.controlplane.rstrip("/"), (a.access or "").rstrip("/")
+
+    # ---- control plane: symbols and risk accounts
+    _, existing = call(cp, cp_tok, "GET", "/api/symbols")
+    have = {s["symbolId"] for s in existing if s.get("status") == "ACTIVE"}
+    added = 0
+    for i, (sid, ticker, px) in enumerate(SYMBOLS):
+        if sid in have:
+            continue
+        code, r = call(cp, cp_tok, "POST", "/api/symbols?wait=10000",
+                       {"symbolId": sid, "ticker": ticker, "shard": i % a.shards, "tickSize": 1, "lotSize": 1,
+                        "referencePrice": px, "priceBandBps": 1000, "maxOrderQty": 100000})
+        added += 1
+        if code != 200:
+            print(f"local-seed: symbol {ticker}: {r.get('status')} (HTTP {code})", file=sys.stderr)
+    _, firms = call(cp, cp_tok, "GET", "/api/firms")
+    have = {f["firmId"] for f in firms}
+    for fid, name, credit, maxpos, _ in FIRMS:
+        if fid not in have:
+            call(cp, cp_tok, "POST", "/api/firms?wait=10000",
+                 {"firmId": fid, "name": name, "creditLimit": credit, "maxPositionPerSymbol": maxpos})
+            added += 1
+    print(f"local-seed: control plane: {len(SYMBOLS)} symbols over {a.shards} shard(s), {len(FIRMS)} firms ({added} added)")
+
+    if not acc:
+        return
+
+    # ---- access service: teams, sessions, keys
+    creds = {"sessions": [], "dropCopy": []}
+    if os.path.exists(a.credentials):
+        with open(a.credentials, encoding="utf-8") as fh:
+            creds = json.load(fh)
+    sess_keys = {s["sessionId"]: s for s in creds.get("sessions", [])}
+    dc_keys = {d["firmId"]: d for d in creds.get("dropCopy", [])}
+    _, teams = call(acc, ac_tok, "GET", "/api/firms")
+    members = {t["firmId"]: {m["sessionId"] for m in t.get("sessions", [])} for t in teams}
+    issued = 0
+
+    def keep(sid, fid, view):
+        nonlocal issued
+        key = view.get("key", view) if isinstance(view, dict) else None
+        if key and key.get("apiKey"):
+            sess_keys[sid] = {"sessionId": sid, "firmId": fid, "apiKey": key["apiKey"]}
+            issued += 1
+
+    for fid, name, _, _, sessions in FIRMS:
+        if fid not in members:
+            for s in sessions:
+                sess_keys.pop(s, None)
+            dc_keys.pop(fid, None)
+            _, r = call(acc, ac_tok, "POST", "/api/firms",
+                        {"firmId": fid, "name": name, "members": [{"sessionId": s, "label": f"s{s}"} for s in sessions]})
+            for m in r["members"]:
+                keep(m["sessionId"], fid, m)
+            continue
+        for s in sessions:
+            if s not in members[fid]:
+                _, r = call(acc, ac_tok, "POST", f"/api/firms/{fid}/sessions", {"sessionId": s, "label": f"s{s}"})
+                keep(s, fid, r["members"][0])
+            elif s not in sess_keys:
+                _, r = call(acc, ac_tok, "POST", f"/api/firms/{fid}/keys",
+                            {"sessionId": s, "scopes": ["TRADE", "QUERY"], "label": "local-seed"})
+                keep(s, fid, r)
+    for fid, *_ in FIRMS:
+        if fid not in dc_keys:
+            _, r = call(acc, ac_tok, "POST", f"/api/firms/{fid}/keys", {"scopes": ["DROP_COPY"], "label": "local-seed drop copy"})
+            dc_keys[fid] = {"firmId": fid, "apiKey": r["apiKey"]}
+            issued += 1
+
+    os.makedirs(os.path.dirname(os.path.abspath(a.credentials)), exist_ok=True)
+    tmp = a.credentials + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump({"sessions": sorted(sess_keys.values(), key=lambda s: s["sessionId"]),
+                   "dropCopy": sorted(dc_keys.values(), key=lambda d: d["firmId"])}, fh, indent=2)
+        fh.write("\n")
+    os.replace(tmp, a.credentials)
+    print(f"local-seed: access: {len(FIRMS)} teams, {len(sess_keys)} session keys ({issued} keys issued) -> {a.credentials}")
+
+
+if __name__ == "__main__":
+    main()

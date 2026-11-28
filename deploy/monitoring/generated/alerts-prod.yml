@@ -245,6 +245,42 @@ groups:
         annotations:
           summary: "{{ $value }} trading date(s) ended on some shards but not all: daily statements not written"
           runbook: "docs/operations.md"
+      - alert: "LmbAccessDirectoryStale"
+        expr: "lmb:gateway_access_directory_age_seconds:max > 300"
+        for: "1m"
+        labels:
+          severity: "warning"
+          profile: "prod"
+        annotations:
+          summary: "A gateway has not reached the access service for {{ $value | humanizeDuration }}: trading continues on its last snapshot, but new teams, keys and revocations do not reach it"
+          runbook: "docs/operations.md"
+      - alert: "LmbAccessDown"
+        expr: "lmb:access_up == 0 or absent(lmb:access_up)"
+        for: "5m"
+        labels:
+          severity: "warning"
+          profile: "prod"
+        annotations:
+          summary: "No access service instance is serving: credential changes are on hold (gateways keep their snapshot)"
+          runbook: "docs/operations.md"
+      - alert: "LmbAccessServiceTokenRejected"
+        expr: "lmb:access_auth_failures:increase15m{listener=\"internal\"} > 0"
+        for: "0m"
+        labels:
+          severity: "warning"
+          profile: "prod"
+        annotations:
+          summary: "The access directory refused {{ $value }} polls in 15m: a gateway or post-trade has the wrong service token"
+          runbook: "docs/operations.md"
+      - alert: "LmbGatewayAuthFailuresHigh"
+        expr: "lmb:gateway_auth_failures:rate5m > 1"
+        for: "10m"
+        labels:
+          severity: "warning"
+          profile: "prod"
+        annotations:
+          summary: "Gateways refuse {{ $value }} logons/queries per second (wrong or revoked keys, or someone guessing)"
+          runbook: "docs/operations.md"
       - alert: "LmbControlPlaneLockHolders"
         expr: "lmb:controlplane_lock_holders != 1"
         for: "1m"

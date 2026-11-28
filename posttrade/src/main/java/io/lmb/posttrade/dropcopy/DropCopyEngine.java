@@ -5,7 +5,9 @@ import io.aeron.archive.ArchiveThreadingMode;
 import io.aeron.archive.ArchivingMediaDriver;
 import io.aeron.driver.MediaDriver;
 import io.aeron.driver.ThreadingMode;
-import io.lmb.common.FirmDirectory;
+import io.lmb.common.access.AccessDirectory;
+import io.lmb.common.access.AccessDirectorySource;
+import io.lmb.common.access.Scope;
 import io.lmb.fix.FixDictionaryImpl;
 import io.lmb.fix.decoder.LogonDecoder;
 import io.lmb.posttrade.PostTradeMetrics;
@@ -62,7 +64,7 @@ public final class DropCopyEngine implements AutoCloseable
     private final String adminKey;
     private final int termLength;
     private final boolean deleteLogsOnStart;
-    private final FirmDirectory firms;
+    private final AccessDirectorySource firms;
     private final PostTradeMetrics metrics;
     final Map<String, Logon> pendingLogons = new ConcurrentHashMap<>();
     private ArchivingMediaDriver driver;
@@ -71,9 +73,10 @@ public final class DropCopyEngine implements AutoCloseable
     private FixLibrary library;
     private volatile SessionAcquireHandler acquireHandler;
 
+    /** Firm logons need a key of that firm with the DROP_COPY scope. */
     public DropCopyEngine(
         final Path dataDir, final String bindHost, final int port, final String compId, final String adminKey,
-        final int termLength, final boolean deleteLogsOnStart, final FirmDirectory firms, final PostTradeMetrics metrics)
+        final int termLength, final boolean deleteLogsOnStart, final AccessDirectorySource firms, final PostTradeMetrics metrics)
     {
         this.baseDir = dataDir.resolve("dropcopy").toAbsolutePath();
         this.aeronDir = baseDir.resolve("aeron").toString();
@@ -225,16 +228,19 @@ public final class DropCopyEngine implements AutoCloseable
             }
             else if (ok)
             {
-                FirmDirectory.Firm firm = null;
+                int wanted = Integer.MIN_VALUE;
                 try
                 {
-                    firm = firms.byId(Integer.parseInt(user));
+                    wanted = Integer.parseInt(user);
                 }
                 catch (final NumberFormatException ignore)
                 {
                 }
-                ok = firm != null && constantTimeEquals(firm.apiKey(), password);
-                firmId = ok ? firm.firmId() : firmId;
+                final AccessDirectory directory = firms.current();
+                final AccessDirectory.KeyEntry k = directory == null ? null :
+                    directory.authenticateFirm(password, Scope.DROP_COPY, System.currentTimeMillis());
+                ok = k != null && k.firmId() == wanted;
+                firmId = ok ? wanted : firmId;
             }
             if (ok)
             {

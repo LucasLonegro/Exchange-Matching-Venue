@@ -764,7 +764,7 @@ final class ReferenceMatcher
     {
         final int scope = d.scopeRaw();
         final int reason = d.reasonRaw();
-        if (scope < 1 || scope > 5 || (reason != 2 && reason != 3 && reason != 8))
+        if (scope < 1 || scope > 6 || (reason != 2 && reason != 3 && reason != 8))
         {
             out.add("CMDREJ corr=" + d.requestId() + " t=4 r=MALFORMED");
             return;
@@ -783,6 +783,7 @@ final class ReferenceMatcher
                 case 2 -> firmKnown && o.firm == firm && o.session == d.sessionId();
                 case 3 -> firmKnown && o.firm == firm && o.sym == s;
                 case 4 -> o.gateway == d.targetGatewayId();
+                case 6 -> firmKnown && o.firm == firm && o.session == d.sessionId() && o.gateway == d.targetGatewayId();
                 default -> o.sym == s;
             };
             if (hit)

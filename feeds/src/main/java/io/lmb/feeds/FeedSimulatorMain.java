@@ -40,10 +40,10 @@ public final class FeedSimulatorMain implements AutoCloseable
         this.loop = loop;
     }
 
-    /** Opens the socket and the metrics endpoint and starts the simulator thread. */
-    public static FeedSimulatorMain start(final Topology topology, final int instance, final EpochNanoClock clock)
+    /** Opens the socket and the metrics endpoint and starts the simulator thread; {@code symbols} is fixed. */
+    public static FeedSimulatorMain start(final Topology topology, final int instance, final SymbolDirectory symbols,
+        final EpochNanoClock clock)
     {
-        final SymbolDirectory symbols = SymbolDirectory.load(topology.symbolsFile());
         final FeedSimulator.Settings settings = FeedSimulator.Settings.from(topology);
         final List<InetSocketAddress> targets = FeedsConfig.simulatorTargets(topology);
         final UdpFeedSink sink = new UdpFeedSink(targets, settings.venues());
@@ -88,7 +88,13 @@ public final class FeedSimulatorMain implements AutoCloseable
     public static void main(final String[] args) throws Exception
     {
         final int instance = Config.getInt("lmb.instance.id", 0);
-        final FeedSimulatorMain sim = start(Topology.load(), instance, new SystemEpochNanoClock());
+        final Topology topology = Topology.load();
+        final SymbolDirectory symbols = ConsolidatorMain.symbols(topology, "feedsim-" + instance);
+        if (symbols == null)
+        {
+            return;
+        }
+        final FeedSimulatorMain sim = start(topology, instance, symbols, new SystemEpochNanoClock());
         final Thread hook = new Thread(() ->
         {
             LOG.info("feedsim {} shutting down", instance);

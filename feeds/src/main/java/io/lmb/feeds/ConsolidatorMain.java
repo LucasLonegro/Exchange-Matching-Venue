@@ -4,6 +4,7 @@ import io.lmb.api.CommandClient;
 import io.lmb.api.VenueClients;
 import io.lmb.common.Config;
 import io.lmb.common.SymbolDirectory;
+import io.lmb.common.SymbolDirectorySource;
 import io.lmb.common.Topology;
 import io.prometheus.metrics.exporter.httpserver.HTTPServer;
 import io.prometheus.metrics.model.registry.PrometheusRegistry;
@@ -12,6 +13,7 @@ import org.agrona.concurrent.SystemEpochNanoClock;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.nio.file.Path;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.io.UncheckedIOException;
@@ -44,12 +46,12 @@ public final class ConsolidatorMain implements AutoCloseable
 
     /**
      * Opens the feed, the command clients and the metrics endpoint, and starts the duty thread. The caller
-     * keeps ownership of {@code venue} and closes it after {@link #close()}.
+     * keeps ownership of {@code venue} and closes it after {@link #close()}. {@code symbols} is fixed for the life
+     * of the process: a symbol listed later gets an NBBO after a restart.
      */
-    public static ConsolidatorMain start(
-        final Topology topology, final int instance, final VenueClients venue, final EpochNanoClock clock)
+    public static ConsolidatorMain start(final Topology topology, final int instance, final SymbolDirectory symbols,
+        final VenueClients venue, final EpochNanoClock clock)
     {
-        final SymbolDirectory symbols = SymbolDirectory.load(topology.symbolsFile());
         final ConsolidatorConfig config = ConsolidatorConfig.from(topology, instance);
         final String handlerName = topology.get(FeedsConfig.HANDLER, FeedsConfig.DEFAULT_HANDLER);
         final CommandClient[] clients = new CommandClient[venue.shardCount()];
@@ -152,15 +154,33 @@ public final class ConsolidatorMain implements AutoCloseable
         metricsServer.close();
     }
 
+    /**
+     * The control plane's symbol snapshot at start (or the cached one while it is unreachable), waiting for a first
+     * one; null if interrupted.
+     */
+    static SymbolDirectory symbols(final Topology topology, final String name)
+    {
+        final Path cache = Path.of(topology.get("lmb.data.dir", "./data"), name, "symbol-directory.json");
+        try (SymbolDirectorySource source = SymbolDirectorySource.fromTopology(topology, cache, name).start())
+        {
+            return source.awaitFirst(name) ? source.current() : null;
+        }
+    }
+
     public static void main(final String[] args) throws Exception
     {
         final int instance = Config.getInt("lmb.instance.id", 0);
         final Topology topology = Topology.load();
+        final SymbolDirectory symbols = symbols(topology, "consolidator-" + instance);
+        if (symbols == null)
+        {
+            return;
+        }
         final VenueClients venue = VenueClients.connect(topology, "consolidator-" + instance);
         final ConsolidatorMain main;
         try
         {
-            main = start(topology, instance, venue, new SystemEpochNanoClock());
+            main = start(topology, instance, symbols, venue, new SystemEpochNanoClock());
         }
         catch (final RuntimeException e)
         {

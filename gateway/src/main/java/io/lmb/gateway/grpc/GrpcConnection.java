@@ -90,6 +90,8 @@ final class GrpcConnection implements SessionOutlet
         req.sessionId = l.getSessionId();
         req.apiKey = l.getApiKey();
         req.cancelOnDisconnect = l.getCancelOnDisconnect();
+        req.cancelOnLogout = l.getCancelOnDisconnect(); // a gRPC stream has no logout distinct from closing it
+        req.cancelOnDisconnectWindowMs = l.getCancelOnDisconnectWindowMs();
         req.nextClientSeq = l.getNextSeq() == 0 ? 1 : l.getNextSeq();
         if (l.getResumeFromCount() > 0)
         {
@@ -109,12 +111,13 @@ final class GrpcConnection implements SessionOutlet
             LOG.info("logon refused for session {} firm {}: {}", req.sessionId, req.firmId, r);
             sendReject(r, msg.getSeq(), 0, switch (r)
             {
-                case AUTH_FAILED -> "unknown firm, session not assigned to firm, or bad api key";
+                case AUTH_FAILED -> "unknown or disabled firm or session, session not of this firm, or bad, expired or revoked api key";
+                case NOT_PERMITTED -> "this api key does not allow order entry";
                 case DUPLICATE_SESSION -> "session " + req.sessionId + " is already connected";
                 default -> "gateway not ready";
             });
-            close(r == Reject.AUTH_FAILED ? Status.UNAUTHENTICATED : r == Reject.DUPLICATE_SESSION ?
-                Status.ALREADY_EXISTS : Status.UNAVAILABLE, r.name());
+            close(r == Reject.AUTH_FAILED ? Status.UNAUTHENTICATED : r == Reject.NOT_PERMITTED ? Status.PERMISSION_DENIED :
+                r == Reject.DUPLICATE_SESSION ? Status.ALREADY_EXISTS : Status.UNAVAILABLE, r.name());
         }
     }
 

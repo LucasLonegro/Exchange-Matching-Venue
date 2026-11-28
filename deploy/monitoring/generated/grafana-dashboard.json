@@ -918,7 +918,7 @@
     },
     {
       "type": "timeseries",
-      "title": "PTP offset |abs|",
+      "title": "Access directory age (oldest gateway)",
       "id": 30,
       "datasource": {
         "type": "prometheus",
@@ -945,6 +945,74 @@
       "targets": [
         {
           "refId": "A",
+          "expr": "lmb:gateway_access_directory_age_seconds:max",
+          "legendFormat": "age"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Auth failures",
+      "id": 31,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 102
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "lmb:gateway_auth_failures:rate5m",
+          "legendFormat": "gateways /s"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "PTP offset |abs|",
+      "id": 32,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 102
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
           "expr": "lmb:ptp_offset_seconds:abs",
           "legendFormat": "{{instance}}"
         }
@@ -953,7 +1021,7 @@
     {
       "type": "timeseries",
       "title": "Targets up",
-      "id": 31,
+      "id": 33,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -962,7 +1030,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 102
+        "y": 110
       },
       "fieldConfig": {
         "defaults": {

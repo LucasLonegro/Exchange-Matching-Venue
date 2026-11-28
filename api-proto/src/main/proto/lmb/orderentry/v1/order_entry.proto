@@ -64,6 +64,9 @@ message Logon {
   bool cancel_on_disconnect = 4;
   repeated ShardCursor resume_from = 5; // empty = only new events; otherwise replay everything after each cursor
   uint64 next_seq = 6;                  // next client seq the client will send (1 on a fresh day)
+  // with cancel_on_disconnect: wait this long after the connection is lost before cancelling, and do not
+  // cancel if the session logs on to the same gateway again meanwhile (0 = cancel at once; capped by the gateway)
+  uint32 cancel_on_disconnect_window_ms = 7;
 }
 
 message NewOrder {
@@ -154,7 +157,7 @@ message SessionReject {
   enum Reason {
     REASON_UNSPECIFIED = 0; NOT_LOGGED_ON = 1; AUTH_FAILED = 2; THROTTLED = 3; UNAVAILABLE = 4;
     BAD_SEQUENCE = 5; UNKNOWN_SYMBOL = 6; INVALID_FIELD = 7; SYMBOL_NOT_TRADING = 8; MAX_ORDER_SIZE = 9;
-    DUPLICATE_SESSION = 10;
+    DUPLICATE_SESSION = 10; NOT_PERMITTED = 11;
   }
   uint64 ref_seq = 1;
   int64 ref_cl_ord_id = 2;
@@ -175,6 +178,7 @@ message SymbolInfo {
   int64 tick_size_cents = 4;
   int64 lot_size = 5;
   string state = 6;
+  int64 reference_price_cents = 7;  // the listing price the gateway knows; the venue moves its own reference
 }
 message ListSymbolsResponse { repeated SymbolInfo symbols = 1; }
 message SessionStatusRequest { int64 session_id = 1; }

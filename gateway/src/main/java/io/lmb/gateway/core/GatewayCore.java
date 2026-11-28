@@ -3,8 +3,11 @@ package io.lmb.gateway.core;
 import io.lmb.api.EventStreamClient;
 import io.lmb.api.VenueClients;
 import io.lmb.common.Events;
-import io.lmb.common.FirmDirectory;
 import io.lmb.common.SymbolDirectory;
+import io.lmb.common.SymbolDirectorySource;
+import io.lmb.common.access.AccessDirectory;
+import io.lmb.common.access.AccessDirectorySource;
+import io.lmb.common.access.Scope;
 import io.lmb.gateway.GatewayConfig;
 import io.lmb.sbe.BooleanType;
 import io.lmb.sbe.CancelOrderEncoder;
@@ -25,6 +28,7 @@ import io.lmb.sbe.SymbolStateChangedDecoder;
 import io.lmb.sbe.TimeInForce;
 import org.agrona.DirectBuffer;
 import org.agrona.collections.Int2ObjectHashMap;
+import org.agrona.collections.Long2LongHashMap;
 import org.agrona.collections.Long2ObjectHashMap;
 import org.agrona.concurrent.Agent;
 import org.agrona.concurrent.EpochNanoClock;
@@ -79,9 +83,17 @@ public final class GatewayCore implements Agent
         public int firmId;
         public long sessionId;
         public String apiKey;
-        /** Set when the transport already authenticated the credentials (FIX: Artio's AuthenticationStrategy). */
-        public boolean preAuthenticated;
+        /**
+         * Set when the transport already checked the credentials against the access directory (FIX: Artio's
+         * AuthenticationStrategy); otherwise the core checks {@code apiKey}.
+         */
+        public AccessDirectory.Grant grant;
+        /** Cancel the session's orders entered through this gateway when the connection is lost. */
         public boolean cancelOnDisconnect;
+        /** ... and when the client logs out (FIX CancelOnDisconnectType 2 and 3; gRPC: same as cancelOnDisconnect). */
+        public boolean cancelOnLogout;
+        /** Wait this long before cancelling; a logon of the same session here meanwhile cancels the cancel. */
+        public long cancelOnDisconnectWindowMs;
         public long nextClientSeq = 1;
         /** Explicit resume cursors: shard ids and event seqs, same length. Null = none. */
         public int[] resumeShards;
@@ -103,7 +115,12 @@ public final class GatewayCore implements Agent
     private final GatewayConfig cfg;
     private final VenueClients venue;
     private final LiveSymbols symbols;
-    private final FirmDirectory firms;
+    /** The control plane's symbol snapshot: seeds {@link #symbols} and is re-applied whenever it changes. */
+    private final SymbolDirectorySource symbolSource;
+    private long symbolUpdatesApplied = -1;
+    /** Set once a first snapshot is in the routing table. */
+    private volatile boolean symbolsSeeded;
+    private final AccessDirectorySource access;
     private final GatewayMetrics metrics;
     private final EpochNanoClock epochClock = new OffsetEpochNanoClock();
     private final ManyToOneConcurrentLinkedQueue<Runnable> tasks = new ManyToOneConcurrentLinkedQueue<>();
@@ -114,6 +131,9 @@ public final class GatewayCore implements Agent
     private final List<CatchupHandler> catchups = new ArrayList<>();
     private final OrderCache orderCache;
     private final Int2ObjectHashMap<String> symbolStates = new Int2ObjectHashMap<>();
+    /** Sessions whose cancel-on-disconnect waits for its window: sessionId -> deadline (System.nanoTime). */
+    private final Long2LongHashMap pendingCod = new Long2LongHashMap(Long.MIN_VALUE);
+    private long nextRevalidateNs;
     private final ReportView reportView;
 
     private final MessageHeaderDecoder headerDecoder = new MessageHeaderDecoder();
@@ -142,13 +162,15 @@ public final class GatewayCore implements Agent
     private volatile Throwable startFailure;
 
     public GatewayCore(
-        final GatewayConfig cfg, final VenueClients venue, final SymbolDirectory symbols, final FirmDirectory firms,
-        final GatewayMetrics metrics)
+        final GatewayConfig cfg, final VenueClients venue, final SymbolDirectorySource symbolSource,
+        final AccessDirectorySource access, final GatewayMetrics metrics)
     {
         this.cfg = cfg;
         this.venue = venue;
-        this.symbols = new LiveSymbols(symbols);
-        this.firms = firms;
+        this.symbolSource = symbolSource;
+        this.symbols = new LiveSymbols();
+        applySymbolSnapshot();
+        this.access = access;
         this.metrics = metrics;
         this.orderCache = new OrderCache(cfg.orderCacheMax);
         this.reportView = new ReportView(this.symbols);
@@ -191,9 +213,10 @@ public final class GatewayCore implements Agent
         return symbols;
     }
 
-    public FirmDirectory firms()
+    /** Who may connect. Thread-safe. */
+    public AccessDirectorySource access()
     {
-        return firms;
+        return access;
     }
 
     public GatewayMetrics metrics()
@@ -212,10 +235,41 @@ public final class GatewayCore implements Agent
         return epochClock.nanoTime();
     }
 
-    /** True once the live event streams have caught up and logons are accepted. Thread-safe. */
+    /**
+     * True once the live event streams have caught up and both an access snapshot and a symbol snapshot are loaded,
+     * so logons are accepted. Thread-safe.
+     */
     public boolean isReady()
     {
-        return ready;
+        return ready && access.current() != null && symbolsSeeded;
+    }
+
+    /** The control plane's symbol snapshot (not the routing table: that is {@link #symbols()}). Thread-safe. */
+    public SymbolDirectorySource symbolSource()
+    {
+        return symbolSource;
+    }
+
+    /**
+     * Upserts every symbol of a new snapshot into the routing table (core thread, or the constructor). The streams'
+     * SymbolDefined events keep it current between snapshots; a snapshot only adds or corrects, never removes.
+     */
+    private int applySymbolSnapshot()
+    {
+        final long u = symbolSource.updates.get();
+        final SymbolDirectory d = symbolSource.current();
+        if (u == symbolUpdatesApplied || d == null)
+        {
+            return 0;
+        }
+        symbolUpdatesApplied = u;
+        for (final SymbolDirectory.Symbol s : d.all())
+        {
+            symbols.onDefined(s.shard(), s.symbolId(), s.ticker(), s.tickSize(), s.lotSize(), s.referencePrice(),
+                s.priceBandBps(), s.maxOrderQty());
+        }
+        symbolsSeeded = true;
+        return 1;
     }
 
     /** Waits until the core thread has started (clients created). Rethrows a start failure. */
@@ -369,9 +423,22 @@ public final class GatewayCore implements Agent
             for (final SessionState s : connected)
             {
                 final SessionOutlet o = s.outlet;
-                detach(s);
+                detach(s, false);
                 o.disconnect(Reject.UNAVAILABLE, "gateway shutting down");
             }
+            // nobody is left to cancel them later: the windows end now
+            final List<Long> waiting = new ArrayList<>();
+            pendingCod.forEach((sessionId, deadline) -> waiting.add(sessionId));
+            pendingCod.clear();
+            for (final long sessionId : waiting)
+            {
+                final SessionState s = sessions.get(sessionId);
+                if (s != null)
+                {
+                    sendCancelOnDisconnect(s);
+                }
+            }
+            metrics.codPending(0);
         });
     }
 
@@ -401,15 +468,22 @@ public final class GatewayCore implements Agent
      */
     public Reject logon(final LogonRequest req, final SessionOutlet outlet)
     {
-        if (!ready || shuttingDown)
+        final AccessDirectory directory = access.current();
+        if (!ready || shuttingDown || directory == null)
         {
             return Reject.UNAVAILABLE;
         }
-        final FirmDirectory.Firm firm = firms.byId(req.firmId);
-        if (firm == null || !firm.sessionIds().contains(req.sessionId) ||
-            (!req.preAuthenticated && !constantTimeEquals(firm.apiKey(), req.apiKey)))
+        final AccessDirectory.Grant g = req.grant != null ? req.grant :
+            directory.authenticateSession(req.firmId, req.sessionId, req.apiKey, System.currentTimeMillis());
+        if (g == null || g.firmId() != req.firmId || g.sessionId() != req.sessionId)
         {
+            metrics.authFailure();
             return Reject.AUTH_FAILED;
+        }
+        if (!g.has(Scope.TRADE) && !g.has(Scope.CANCEL))
+        {
+            metrics.authFailure();
+            return Reject.NOT_PERMITTED;
         }
         SessionState s = sessions.get(req.sessionId);
         if (s != null && s.outlet != null)
@@ -424,8 +498,21 @@ public final class GatewayCore implements Agent
             sessions.put(req.sessionId, s);
         }
         s.nextExpectedClientSeq = known && s.nextExpectedClientSeq > 0 ? s.nextExpectedClientSeq : Math.max(1, req.nextClientSeq);
-        s.cancelOnDisconnect = req.cancelOnDisconnect;
-        s.bucket = new TokenBucket(cfg.throttleRatePerSec, cfg.throttleBurst, now);
+        s.grant = g;
+        s.canTrade = g.has(Scope.TRADE);
+        s.codOnDisconnect = req.cancelOnDisconnect;
+        s.codOnLogout = req.cancelOnLogout;
+        s.codWindowNs = Math.max(0, Math.min(req.cancelOnDisconnectWindowMs, cfg.codMaxWindowMs)) * 1_000_000L;
+        if (pendingCod.remove(req.sessionId) != Long.MIN_VALUE)
+        {
+            LOG.info("session {} logged on again within its cancel-on-disconnect window: orders kept", req.sessionId);
+            metrics.codPending(pendingCod.size());
+        }
+        final AccessDirectory.Tier tier = g.tier();
+        s.orderRatePerSec = tier != null ? tier.orderRatePerSec() : cfg.throttleRatePerSec;
+        s.messageRatePerSec = tier != null ? tier.messageRatePerSec() : cfg.messageRatePerSec;
+        s.orderBucket = new TokenBucket(s.orderRatePerSec, tier != null ? tier.orderBurst() : cfg.throttleBurst, now);
+        s.messageBucket = new TokenBucket(s.messageRatePerSec, tier != null ? tier.messageBurst() : cfg.messageBurst, now);
         s.outlet = outlet;
         s.connectedAtNs = now;
         s.lastInboundNs = now;
@@ -472,18 +559,24 @@ public final class GatewayCore implements Agent
         }
         connectedSessions++;
         metrics.sessions(connectedSessions);
-        LOG.info("session {} (firm {}) logged on via {}, next client seq {}", s.sessionId, s.firmId,
-            outlet.transport(), s.nextExpectedClientSeq);
+        LOG.info("session {} (firm {}, key {}, tier {}) logged on via {}, next client seq {}", s.sessionId, s.firmId,
+            g.keyId(), tier == null ? "default" : tier.name(), outlet.transport(), s.nextExpectedClientSeq);
         outlet.onLogonAccepted(s, s.nextExpectedClientSeq, cfg.heartbeatIntervalMs);
         return null;
     }
 
-    /** The transport went away (client close, network, logout). Core thread. Idempotent. */
+    /** The transport went away (client close, network). Core thread. Idempotent. */
     public void onTransportClosed(final SessionState s, final SessionOutlet outlet)
+    {
+        onTransportClosed(s, outlet, false);
+    }
+
+    /** The transport went away; {@code logout}: the client logged out (FIX Logout) rather than losing the connection. */
+    public void onTransportClosed(final SessionState s, final SessionOutlet outlet, final boolean logout)
     {
         if (s != null && s.outlet == outlet)
         {
-            detach(s);
+            detach(s, logout);
         }
     }
 
@@ -495,11 +588,11 @@ public final class GatewayCore implements Agent
         {
             return;
         }
-        detach(s);
+        detach(s, false);
         o.disconnect(reason, text);
     }
 
-    private void detach(final SessionState s)
+    private void detach(final SessionState s, final boolean logout)
     {
         LOG.info("session {} disconnected", s.sessionId);
         for (int sh = 0; sh < shards.length; sh++)
@@ -523,24 +616,111 @@ public final class GatewayCore implements Agent
         connectedSessions--;
         metrics.sessions(connectedSessions);
         metrics.catchups(catchups.size());
-        if (s.cancelOnDisconnect)
+        // a gateway shutting down leaves the orders unattended, whatever ended the connection
+        final boolean cod = shuttingDown ? s.codOnDisconnect || s.codOnLogout : logout ? s.codOnLogout : s.codOnDisconnect;
+        if (cod)
         {
-            for (final ShardChannel ch : shards)
+            if (s.codWindowNs > 0 && !shuttingDown)
             {
-                final InFlight f = new InFlight();
-                f.kind = OrderRequest.Kind.MASS_CANCEL;
-                f.internal = true;
-                f.urgent = true;
-                f.firmId = s.firmId;
-                f.sessionId = s.sessionId;
-                f.requestId = -(++internalRequestIds);
-                massCancelEncoder.wrapAndApplyHeader(f.buffer, 0, headerEncoder)
-                    .requestId(f.requestId).sessionId(s.sessionId).gatewayInTsNs(epochNs())
-                    .firmId(s.firmId).symbolId(0).gatewayId(cfg.gatewayId).targetGatewayId(0)
-                    .scope(MassCancelScope.SESSION).reason(CancelReason.DISCONNECT);
-                f.length = HEADER + massCancelEncoder.encodedLength();
-                enqueue(ch, f, System.nanoTime());
-                metrics.cancelOnDisconnect();
+                pendingCod.put(s.sessionId, System.nanoTime() + s.codWindowNs);
+                metrics.codPending(pendingCod.size());
+            }
+            else
+            {
+                sendCancelOnDisconnect(s);
+            }
+        }
+    }
+
+    /**
+     * Cancels the session's orders entered (or last replaced) through this gateway, on every shard. Orders the
+     * session entered through another gateway, for example after logging on there, are left alone. The commands
+     * are internal: never expired or abandoned.
+     */
+    private void sendCancelOnDisconnect(final SessionState s)
+    {
+        LOG.info("cancel-on-disconnect for session {}", s.sessionId);
+        for (final ShardChannel ch : shards)
+        {
+            final InFlight f = new InFlight();
+            f.kind = OrderRequest.Kind.MASS_CANCEL;
+            f.internal = true;
+            f.urgent = true;
+            f.firmId = s.firmId;
+            f.sessionId = s.sessionId;
+            f.requestId = -(++internalRequestIds);
+            massCancelEncoder.wrapAndApplyHeader(f.buffer, 0, headerEncoder)
+                .requestId(f.requestId).sessionId(s.sessionId).gatewayInTsNs(epochNs())
+                .firmId(s.firmId).symbolId(0).gatewayId(cfg.gatewayId).targetGatewayId(cfg.gatewayId)
+                .scope(MassCancelScope.SESSION_GATEWAY).reason(CancelReason.DISCONNECT);
+            f.length = HEADER + massCancelEncoder.encodedLength();
+            enqueue(ch, f, System.nanoTime());
+            metrics.cancelOnDisconnect();
+        }
+    }
+
+    private void firePendingCancelOnDisconnect(final long now)
+    {
+        if (pendingCod.isEmpty())
+        {
+            return;
+        }
+        final List<Long> due = new ArrayList<>();
+        pendingCod.forEach((sessionId, deadline) ->
+        {
+            if (now - deadline >= 0)
+            {
+                due.add(sessionId);
+            }
+        });
+        for (final long sessionId : due)
+        {
+            pendingCod.remove(sessionId);
+            final SessionState s = sessions.get(sessionId);
+            if (s != null && s.outlet == null)
+            {
+                sendCancelOnDisconnect(s);
+            }
+        }
+        if (!due.isEmpty())
+        {
+            metrics.codPending(pendingCod.size());
+        }
+    }
+
+    /**
+     * Ends the connections whose grant a newer access snapshot revoked: the key was revoked or has expired, or
+     * the session or firm was disabled. Scope and tier changes wait for the next logon.
+     */
+    private void revalidateSessions(final long now)
+    {
+        final AccessDirectory directory = access.current();
+        if (directory == null || now < nextRevalidateNs)
+        {
+            return;
+        }
+        nextRevalidateNs = now + cfg.accessRevalidateMs * 1_000_000L;
+        final long nowMs = System.currentTimeMillis();
+        List<SessionState> revoked = null;
+        for (final SessionState s : sessions.values())
+        {
+            if (s.outlet != null && s.grant != null && !directory.stillValid(s.grant, nowMs))
+            {
+                if (revoked == null)
+                {
+                    revoked = new ArrayList<>();
+                }
+                revoked.add(s);
+            }
+        }
+        if (revoked != null)
+        {
+            for (final SessionState s : revoked)
+            {
+                LOG.info("session {} disconnected: credentials revoked, expired or disabled (key {})", s.sessionId,
+                    s.grant.keyId());
+                metrics.accessRevocation();
+                disconnect(s, Reject.AUTH_FAILED, "credentials no longer valid");
             }
         }
     }
@@ -583,6 +763,16 @@ public final class GatewayCore implements Agent
         final long now = System.nanoTime();
         s.lastInboundNs = now;
         metrics.request(req.kind);
+        if (!s.messageBucket.tryAcquire(now))
+        {
+            reject(s, req, Reject.THROTTLED, "message rate above " + s.messageRatePerSec + "/s");
+            return;
+        }
+        if (!s.canTrade && (req.kind == OrderRequest.Kind.NEW || req.kind == OrderRequest.Kind.REPLACE))
+        {
+            reject(s, req, Reject.NOT_PERMITTED, "this session's key allows cancels only");
+            return;
+        }
         final SymbolDirectory.Symbol sym = req.symbol == null || req.symbol.isEmpty() ? null : symbols.byTicker(req.symbol);
         switch (req.kind)
         {
@@ -620,9 +810,9 @@ public final class GatewayCore implements Agent
                 {
                     reject(s, req, Reject.SYMBOL_NOT_TRADING, "symbol removed");
                 }
-                else if (!s.bucket.tryAcquire(now))
+                else if (!s.orderBucket.tryAcquire(now))
                 {
-                    reject(s, req, Reject.THROTTLED, "order rate above " + cfg.throttleRatePerSec + "/s");
+                    reject(s, req, Reject.THROTTLED, "order rate above " + s.orderRatePerSec + "/s");
                 }
                 else
                 {
@@ -651,9 +841,9 @@ public final class GatewayCore implements Agent
                 {
                     reject(s, req, Reject.INVALID_FIELD, "price must not be negative");
                 }
-                else if (req.kind == OrderRequest.Kind.REPLACE && !s.bucket.tryAcquire(now))
+                else if (req.kind == OrderRequest.Kind.REPLACE && !s.orderBucket.tryAcquire(now))
                 {
-                    reject(s, req, Reject.THROTTLED, "order rate above " + cfg.throttleRatePerSec + "/s");
+                    reject(s, req, Reject.THROTTLED, "order rate above " + s.orderRatePerSec + "/s");
                 }
                 else
                 {
@@ -1350,7 +1540,7 @@ public final class GatewayCore implements Agent
 
     private int onTimer(final long now)
     {
-        int work = 0;
+        int work = applySymbolSnapshot();
         for (final ShardChannel ch : shards)
         {
             work += checkInFlight(ch, now);
@@ -1401,6 +1591,8 @@ public final class GatewayCore implements Agent
                 disconnect(s, Reject.UNAVAILABLE, "heartbeat timeout");
             }
         }
+        firePendingCancelOnDisconnect(now);
+        revalidateSessions(now);
         if (now >= nextMetricsNs)
         {
             nextMetricsNs = now + cfg.metricsIntervalMs * 1_000_000L;
@@ -1457,12 +1649,6 @@ public final class GatewayCore implements Agent
     {
         final ReportView v = new ReportView(symbols);
         return v.wrap(new UnsafeBuffer(report), 0, report.length);
-    }
-
-    /** Firm owning a session, or null. Thread-safe (directory is immutable). */
-    public FirmDirectory.Firm firmOfSession(final long sessionId)
-    {
-        return firms.bySession(sessionId);
     }
 
     public static boolean constantTimeEquals(final String expected, final String actual)

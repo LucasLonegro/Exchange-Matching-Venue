@@ -5,7 +5,8 @@ import io.aeron.archive.ArchiveThreadingMode;
 import io.aeron.archive.ArchivingMediaDriver;
 import io.aeron.driver.MediaDriver;
 import io.aeron.driver.ThreadingMode;
-import io.lmb.common.FirmDirectory;
+import io.lmb.common.access.AccessDirectory;
+import io.lmb.common.access.Scope;
 import io.lmb.fix.FixDictionaryImpl;
 import io.lmb.fix.decoder.LogonDecoder;
 import io.lmb.gateway.GatewayConfig;
@@ -42,7 +43,7 @@ import java.util.concurrent.TimeUnit;
  * gateway core thread, so FIX sessions call the core directly with no hand-off.
  *
  * <p>Logon: SenderCompID = session id, TargetCompID = {@code lmb.gateway.fix.compId},
- * Username (553) = firm id, Password (554) = API key, checked against the FirmDirectory in the
+ * Username (553) = firm id, Password (554) = API key, checked against the access directory snapshot in the
  * engine's AuthenticationStrategy. CancelOnDisconnectType (35002) 1 or 3 enables cancel-on-disconnect.
  * LmbResumeFrom (20010) "shard:seq;shard:seq" replays reports after those cursors with PossResend=Y.
  */
@@ -50,7 +51,7 @@ public final class FixFrontEnd implements GatewayCore.Poller, AutoCloseable
 {
     private static final Logger LOG = LoggerFactory.getLogger(FixFrontEnd.class);
 
-    record LogonExtras(String resumeFrom)
+    record LogonExtras(AccessDirectory.Grant grant, String resumeFrom)
     {
     }
 
@@ -120,7 +121,7 @@ public final class FixFrontEnd implements GatewayCore.Poller, AutoCloseable
         driver = ArchivingMediaDriver.launch(driverCtx, archiveCtx);
 
         final EngineConfiguration ec = new EngineConfiguration()
-            .bindTo(cfg.bindHost, cfg.fixPort)
+            .bindTo(cfg.fixBindHost != null ? cfg.fixBindHost : cfg.bindHost, cfg.fixListenPort > 0 ? cfg.fixListenPort : cfg.fixPort)
             .libraryAeronChannel("aeron:ipc")
             .logFileDir(new File(base, "logs").getAbsolutePath())
             .deleteLogFileDirOnStart(cfg.fixDeleteLogsOnStart)
@@ -137,7 +138,8 @@ public final class FixFrontEnd implements GatewayCore.Poller, AutoCloseable
             .controlRequestChannel("aeron:ipc")
             .controlResponseChannel("aeron:ipc");
         engine = FixEngine.launch(ec);
-        LOG.info("FIX engine listening on {}:{}", cfg.bindHost, cfg.fixPort);
+        LOG.info("FIX engine listening on {}:{}", cfg.fixBindHost != null ? cfg.fixBindHost : cfg.bindHost,
+            cfg.fixListenPort > 0 ? cfg.fixListenPort : cfg.fixPort);
     }
 
     // ------------------------------------------------------------------ core thread
@@ -181,24 +183,27 @@ public final class FixFrontEnd implements GatewayCore.Poller, AutoCloseable
     private SessionHandler onSessionAcquired(final Session session, final SessionAcquiredInfo info)
     {
         final long sessionId = parseLong(session.compositeKey().remoteCompId());
-        final FirmDirectory.Firm firm = core.firmOfSession(sessionId);
         final FixSession handler = new FixSession(core, session);
         final LogonExtras extras = pendingLogons.remove(sessionId);
-        if (firm == null)
+        if (extras == null)
         {
             session.logoutAndDisconnect();
             return handler;
         }
         final GatewayCore.LogonRequest req = new GatewayCore.LogonRequest();
-        req.firmId = firm.firmId();
+        req.firmId = extras.grant().firmId();
         req.sessionId = sessionId;
-        req.preAuthenticated = true;
+        req.grant = extras.grant();
+        // CancelOnDisconnectType (35002): 1 on a lost connection, 2 on a logout, 3 on both;
+        // CancelOnDisconnectTimeWindow (35003, ms): wait that long, the gateway caps it
         final CancelOnDisconnectOption cod = session.cancelOnDisconnectOption();
         req.cancelOnDisconnect = cod == CancelOnDisconnectOption.CANCEL_ON_DISCONNECT_ONLY ||
-            cod == CancelOnDisconnectOption.CANCEL_ON_DISCONNECT_OR_LOGOUT ||
-            cod == CancelOnDisconnectOption.CANCEL_ON_LOGOUT_ONLY;
+            cod == CancelOnDisconnectOption.CANCEL_ON_DISCONNECT_OR_LOGOUT;
+        req.cancelOnLogout = cod == CancelOnDisconnectOption.CANCEL_ON_LOGOUT_ONLY ||
+            cod == CancelOnDisconnectOption.CANCEL_ON_DISCONNECT_OR_LOGOUT;
+        req.cancelOnDisconnectWindowMs = TimeUnit.NANOSECONDS.toMillis(Math.max(0, session.cancelOnDisconnectTimeoutWindowInNs()));
         req.resumeFromOwnCursors = true;
-        if (extras != null && extras.resumeFrom() != null && !extras.resumeFrom().isBlank())
+        if (extras.resumeFrom() != null && !extras.resumeFrom().isBlank())
         {
             parseCursors(extras.resumeFrom(), req);
         }
@@ -207,6 +212,11 @@ public final class FixFrontEnd implements GatewayCore.Poller, AutoCloseable
         {
             LOG.info("FIX session {} refused: {}", sessionId, r);
             session.logoutAndDisconnect();
+        }
+        else
+        {
+            LOG.info("FIX session {} logged on (key {}, cancel-on-disconnect {}, window {} ms)", sessionId,
+                extras.grant().keyId(), cod, req.cancelOnDisconnectWindowMs);
         }
         return handler;
     }
@@ -252,7 +262,10 @@ public final class FixFrontEnd implements GatewayCore.Poller, AutoCloseable
         }
     }
 
-    /** Runs on the engine's framer thread; uses only immutable directory data and a concurrent map. */
+    /**
+     * Runs on the engine's framer thread; reads only the immutable access snapshot and a concurrent map. The grant
+     * it produces travels with the logon to the core, which keeps it in the session's state.
+     */
     private final class Authenticator implements AuthenticationStrategy
     {
         @Override
@@ -262,21 +275,23 @@ public final class FixFrontEnd implements GatewayCore.Poller, AutoCloseable
             {
                 return false;
             }
+            final AccessDirectory directory = core.access().current();
             final long sessionId = parseLong(logon.header().senderCompIDAsString());
             final long firmId = logon.hasUsername() ? parseLong(logon.usernameAsString()) : -1;
-            final FirmDirectory.Firm firm = core.firmOfSession(sessionId);
-            final boolean ok = firm != null && firm.firmId() == firmId &&
-                cfg.fixCompId.equals(logon.header().targetCompIDAsString()) &&
-                logon.hasPassword() && GatewayCore.constantTimeEquals(firm.apiKey(), logon.passwordAsString());
-            if (ok)
+            AccessDirectory.Grant grant = null;
+            if (directory != null && firmId >= 0 && firmId <= Integer.MAX_VALUE && logon.hasPassword() &&
+                cfg.fixCompId.equals(logon.header().targetCompIDAsString()))
             {
-                pendingLogons.put(sessionId, new LogonExtras(logon.hasLmbResumeFrom() ? logon.lmbResumeFromAsString() : null));
+                grant = directory.authenticateSession((int)firmId, sessionId, logon.passwordAsString(), System.currentTimeMillis());
             }
-            else
+            if (grant != null && (grant.has(Scope.TRADE) || grant.has(Scope.CANCEL)))
             {
-                LOG.info("FIX logon refused for SenderCompID {}", logon.header().senderCompIDAsString());
+                pendingLogons.put(sessionId, new LogonExtras(grant, logon.hasLmbResumeFrom() ? logon.lmbResumeFromAsString() : null));
+                return true;
             }
-            return ok;
+            core.metrics().authFailureFromFrontEnd();
+            LOG.info("FIX logon refused for SenderCompID {}", logon.header().senderCompIDAsString());
+            return false;
         }
     }
 

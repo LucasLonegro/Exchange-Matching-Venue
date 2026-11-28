@@ -1,7 +1,5 @@
 # BuildKit uses <Dockerfile>.dockerignore next to the Dockerfile. Context = repository root;
-# the image only needs the assembled distribution and deploy/.
+# the image only needs the assembled distribution and deploy/bin.
 *
 !dist/target/lmb/lib/
 !deploy/bin/
-!deploy/local/symbols.csv
-!deploy/local/firms.csv

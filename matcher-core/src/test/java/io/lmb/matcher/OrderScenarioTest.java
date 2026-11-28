@@ -438,6 +438,22 @@ class OrderScenarioTest
     }
 
     @Test
+    void sessionGatewayMassCancelLeavesTheSessionsOrdersFromOtherGateways()
+    {
+        final Harness h = new Harness().standard();
+        h.send(Cmd.newOrder(SA, 1, A, 1, SYM, 1, Side.BUY, OrdType.LIMIT, TimeInForce.DAY, 9_900, 100, false, 0));
+        h.send(Cmd.newOrder(SA, 2, A, 1, SYM, 2, Side.BUY, OrdType.LIMIT, TimeInForce.DAY, 9_800, 100, false, 0));
+        h.send(Cmd.newOrder(SA, 3, A, 1, SYM, 1, Side.BUY, OrdType.LIMIT, TimeInForce.DAY, 9_700, 100, false, 0));
+        h.send(Cmd.newOrder(SA, 4, A, 1, SYM, 2, Side.BUY, OrdType.LIMIT, TimeInForce.DAY, 9_600, 100, false, 0));
+        final List<Ev> mc = h.send(Cmd.massCancel(1, SA, A, 0, 1, 1, io.lmb.sbe.MassCancelScope.SESSION_GATEWAY, CancelReason.DISCONNECT));
+        assertKinds(mc, "ER:CANCELED", "ER:CANCELED", "DELTA", "DELTA", "MASSDONE");
+        assertEquals(1, mc.get(0).er().orderId());
+        assertEquals(3, mc.get(1).er().orderId());
+        final List<Ev> rest = h.send(Cmd.massCancel(2, SA, A, 0, 1, 0, io.lmb.sbe.MassCancelScope.SESSION, CancelReason.DISCONNECT));
+        assertKinds(rest, "ER:CANCELED", "ER:CANCELED", "DELTA", "DELTA", "MASSDONE");
+    }
+
+    @Test
     void possResendDuplicatesAreDroppedSilentlyForEveryRequestType()
     {
         final Harness h = new Harness().standard();

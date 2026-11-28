@@ -33,6 +33,11 @@ public final class PostTradeConfig
     public int dropCopyTermBufferLength = 256 * 1024;
     public boolean dropCopyDeleteLogsOnStart;
     public long dropCopyCheckpointIntervalMs = 1000;
+    /** Drop copy credentials: base URL of the access service's directory, polled (required by PostTradeMain). */
+    public String accessUrl;
+    /** Bearer token of the access service's directory; the default is the local one (lmb.access.serviceToken). */
+    public String accessToken = "lmb-local-access";
+    public long accessPollMs = 2000;
 
     public boolean surveillanceEnabled = true;
     /** Kafka bootstrap servers; null or blank = write JSON lines to {@link #surveillanceFile}. */
@@ -64,6 +69,9 @@ public final class PostTradeConfig
         c.dropCopyPort = t.dropCopyFixPort() + instance;
         c.dropCopyCompId = t.get("lmb.posttrade.dropcopy.compId", c.dropCopyCompId);
         c.dropCopyAdminKey = t.get("lmb.posttrade.dropcopy.adminKey", null);
+        c.accessUrl = t.get("lmb.posttrade.access.url", null);
+        c.accessToken = t.get("lmb.posttrade.access.token", c.accessToken);
+        c.accessPollMs = t.getLong("lmb.posttrade.access.pollMs", c.accessPollMs);
         c.dropCopyExecTypes = t.get("lmb.posttrade.dropcopy.execTypes", c.dropCopyExecTypes);
         c.dropCopyTermBufferLength = t.getInt("lmb.posttrade.dropcopy.termBufferLength", c.dropCopyTermBufferLength);
         c.dropCopyDeleteLogsOnStart = t.getBool("lmb.posttrade.dropcopy.deleteLogsOnStart", c.dropCopyDeleteLogsOnStart);

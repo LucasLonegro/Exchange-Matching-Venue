@@ -109,7 +109,12 @@ public final class LoadGeneratorMain
         final List<SymbolDirectory.Symbol> syms = new ArrayList<>();
         for (final String t : ctx.get("symbols", defaultSymbols(ctx)).split(","))
         {
-            syms.add(ctx.symbols.byTicker(t.trim()));
+            final SymbolDirectory.Symbol sym = ctx.symbols().byTicker(t.trim());
+            if (sym == null)
+            {
+                throw new IllegalArgumentException("unknown symbol " + t.trim() + " (not listed by the gateway)");
+            }
+            syms.add(sym);
         }
         final List<OrderSession> sessions = new ArrayList<>();
         final List<Long> firmOf = new ArrayList<>();
@@ -120,7 +125,7 @@ public final class LoadGeneratorMain
             session.listener(this::onReport);
             session.logon(10_000);
             sessions.add(session);
-            firmOf.add((long)ctx.firms.bySession(id).firmId());
+            firmOf.add((long)ctx.sessionKey(id).firmId());
         }
         System.out.printf("LOADGEN start protocol=%s gateway=%s:%d rate=%.0f/s duration=%ds warmup=%ds sessions=%d symbols=%s%n",
             ctx.protocol, ctx.host, ctx.port, rate, durationS, warmupS, sessions.size(), ctx.get("symbols", defaultSymbols(ctx)));
@@ -284,7 +289,7 @@ public final class LoadGeneratorMain
         final StringBuilder sb = new StringBuilder();
         for (int shard = 0; shard < ctx.topology.shardCount(); shard++)
         {
-            for (final SymbolDirectory.Symbol s : ctx.symbols.all())
+            for (final SymbolDirectory.Symbol s : ctx.symbols().all())
             {
                 if (s.shard() == shard)
                 {

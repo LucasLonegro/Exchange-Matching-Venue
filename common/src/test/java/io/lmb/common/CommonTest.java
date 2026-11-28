@@ -5,13 +5,14 @@ import io.lmb.sbe.MessageHeaderEncoder;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.junit.jupiter.api.Test;
 
-import java.nio.file.Files;
-import java.nio.file.Path;
+import java.util.List;
 import java.util.Properties;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CommonTest
@@ -70,33 +71,34 @@ class CommonTest
         return chain.finish().clone();
     }
 
-    // band-stp
     @Test
-    void symbolDirectoryOptionalBandColumns() throws Exception
+    void symbolDirectoryJsonRoundTripAndContentVersion()
     {
-        final Path dir = Path.of("target", "symdir-test");
-        Files.createDirectories(dir);
-        final Path plain = dir.resolve("plain.csv");
-        Files.writeString(plain, "symbolId,ticker,shard,tickSize,lotSize,referencePrice,priceBandBps,maxOrderQty\n" +
-            "1,AAA,0,1,1,10000,1000,100000\n");
-        final SymbolDirectory.Symbol a = SymbolDirectory.load(plain).byId(1);
-        assertEquals(SymbolDirectory.DEFAULT_DYNAMIC_BAND_BPS, a.dynamicBandBps());
-        assertEquals(SymbolDirectory.DEFAULT_VOLATILITY_AUCTION_NS, a.volatilityAuctionNs());
+        final List<SymbolDirectory.Symbol> list = List.of(
+            new SymbolDirectory.Symbol(1, "AAA", 0, 1, 1, 10_000, 1000, 100_000, 200, 60_000_000_000L),
+            new SymbolDirectory.Symbol(2, "BBB", 1, 5, 10, 42_000, 500, 1_000));
+        final SymbolDirectory d = SymbolDirectory.fromJson(SymbolDirectory.toJson(list));
+        assertEquals(list, d.all());
+        assertFalse(d.version().isEmpty());
+        assertEquals(d.version(), SymbolDirectory.fromJson(SymbolDirectory.toJson(list)).version(), "same content, same version");
+        assertNotEquals(d.version(), SymbolDirectory.fromJson(SymbolDirectory.toJson(list.subList(0, 1))).version());
+        assertEquals(SymbolDirectory.DEFAULT_DYNAMIC_BAND_BPS, d.byTicker("BBB").dynamicBandBps());
 
-        final Path extended = dir.resolve("extended.csv");
-        Files.writeString(extended,
-            "symbolId,ticker,shard,tickSize,lotSize,referencePrice,priceBandBps,maxOrderQty,volatilityAuctionNs,dynamicBandBps\n" +
-            "1,AAA,0,1,1,10000,1000,100000,60000000000,200\n" +
-            "2,BBB,0,1,1,10000,1000,100000,,\n");
-        final SymbolDirectory d = SymbolDirectory.load(extended);
-        assertEquals(200, d.byId(1).dynamicBandBps());
-        assertEquals(60_000_000_000L, d.byId(1).volatilityAuctionNs());
-        assertEquals(0, d.byId(2).dynamicBandBps());
-        assertEquals(SymbolDirectory.DEFAULT_VOLATILITY_AUCTION_NS, d.byId(2).volatilityAuctionNs());
+        final SymbolDirectory old = SymbolDirectory.fromJson(
+            "{\"version\":\"v\",\"symbols\":[{\"symbolId\":3,\"ticker\":\"CCC\",\"shard\":0,\"tickSize\":1," +
+            "\"lotSize\":1,\"referencePrice\":5000,\"priceBandBps\":1000,\"maxOrderQty\":10}]}");
+        assertEquals(SymbolDirectory.DEFAULT_VOLATILITY_AUCTION_NS, old.byId(3).volatilityAuctionNs(), "optional fields default");
+        assertThrows(IllegalArgumentException.class, () -> SymbolDirectory.fromJson("{\"symbols\":[{\"symbolId\":1}]}"));
+    }
 
-        final Path headerless = dir.resolve("headerless.csv");
-        Files.writeString(headerless, "1,AAA,0,1,1,10000,1000,100000,150,1000\n");
-        assertEquals(150, SymbolDirectory.load(headerless).byId(1).dynamicBandBps());
-        assertEquals(1000, SymbolDirectory.load(headerless).byId(1).volatilityAuctionNs());
+    @Test
+    void symbolSourceUrlsDefaultToEveryControlPlaneInstance()
+    {
+        final Properties p = new Properties();
+        p.setProperty("lmb.controlplane.instances", "2");
+        p.setProperty("lmb.controlplane.1.host", "cp-b");
+        assertEquals(List.of("http://127.0.0.1:9700", "http://cp-b:9701"), SymbolDirectorySource.urls(Topology.of(p)));
+        p.setProperty("lmb.symbols.url", "http://a:1, http://b:2");
+        assertEquals(List.of("http://a:1", "http://b:2"), SymbolDirectorySource.urls(Topology.of(p)));
     }
 }

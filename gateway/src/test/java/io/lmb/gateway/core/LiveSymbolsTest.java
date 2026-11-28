@@ -3,8 +3,6 @@ package io.lmb.gateway.core;
 import io.lmb.common.SymbolDirectory;
 import org.junit.jupiter.api.Test;
 
-import java.util.List;
-
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -12,10 +10,10 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 class LiveSymbolsTest
 {
     @Test
-    void streamDefinitionsAddAndChangeSymbolsOverTheCsvSeed()
+    void definitionsAddAndChangeSymbols()
     {
-        final LiveSymbols s = new LiveSymbols(new SymbolDirectory(List.of(
-            new SymbolDirectory.Symbol(1, "AAPL", 0, 1, 1, 19_000, 1000, 100_000))));
+        final LiveSymbols s = new LiveSymbols();
+        s.onDefined(0, 1, "AAPL", 1, 1, 19_000, 1000, 100_000);  // from the control plane's snapshot
         final SymbolDirectory.Symbol aapl = s.byTicker("AAPL");
         assertNull(s.byTicker("IBM"));
 

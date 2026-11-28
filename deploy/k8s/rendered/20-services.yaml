@@ -91,6 +91,16 @@ spec:
                   key: "cluster-secret"
             - name: "LMB_AERON_DIR"
               value: "/dev/shm/aeron"
+            - name: "LMB_GATEWAY_ACCESS_TOKEN"
+              valueFrom:
+                secretKeyRef:
+                  name: "lmb-secrets"
+                  key: "access-service-token"
+            - name: "LMB_SYMBOLS_TOKEN"
+              valueFrom:
+                secretKeyRef:
+                  name: "lmb-secrets"
+                  key: "controlplane-service-token"
           resources:
             requests:
               cpu: "6"
@@ -101,9 +111,6 @@ spec:
           ports:
             - name: "grpc"
               containerPort: 9100
-              protocol: "TCP"
-            - name: "fix"
-              containerPort: 9200
               protocol: "TCP"
             - name: "metrics"
               containerPort: 9300
@@ -121,24 +128,59 @@ spec:
             - name: "config"
               mountPath: "/etc/lmb/topology.properties"
               subPath: "topology.properties"
-            - name: "config"
-              mountPath: "/etc/lmb/refdata/symbols.csv"
-              subPath: "symbols.csv"
-            - name: "config"
-              mountPath: "/etc/lmb/refdata/firms.csv"
-              subPath: "firms.csv"
             - name: "logs"
               mountPath: "/var/log/lmb"
             - name: "data"
               mountPath: "/var/lib/lmb"
             - name: "shm"
               mountPath: "/dev/shm"
+            - name: "tls"
+              mountPath: "/etc/lmb/tls"
+              readOnly: true
           readinessProbe:
             httpGet:
               path: "/metrics"
               port: 9300
             periodSeconds: 5
             failureThreshold: 3
+        - name: "fix-tls"
+          image: "registry.lmb.internal/envoy:v1.32.3"
+          args:
+            - "-c"
+            - "/etc/envoy/envoy.yaml"
+            - "--concurrency"
+            - "1"
+            - "--log-level"
+            - "warn"
+            - "--disable-hot-restart"
+          ports:
+            - name: "fix"
+              containerPort: 9200
+              protocol: "TCP"
+          resources:
+            requests:
+              cpu: "1"
+              memory: "256Mi"
+            limits:
+              cpu: "1"
+              memory: "256Mi"
+          readinessProbe:
+            tcpSocket:
+              port: 9200
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - "ALL"
+          volumeMounts:
+            - name: "fix-tls"
+              mountPath: "/etc/envoy"
+              readOnly: true
+            - name: "tls"
+              mountPath: "/etc/lmb/tls"
+              readOnly: true
       volumes:
         - name: "config"
           configMap:
@@ -150,6 +192,13 @@ spec:
           emptyDir:
             medium: "Memory"
             sizeLimit: "2Gi"
+        - name: "tls"
+          secret:
+            secretName: "lmb-gateway-tls"
+            defaultMode: 288
+        - name: "fix-tls"
+          configMap:
+            name: "lmb-fix-tls"
       hostNetwork: true
       dnsPolicy: "ClusterFirstWithHostNet"
       initContainers:
@@ -363,12 +412,6 @@ spec:
             - name: "config"
               mountPath: "/etc/lmb/topology.properties"
               subPath: "topology.properties"
-            - name: "config"
-              mountPath: "/etc/lmb/refdata/symbols.csv"
-              subPath: "symbols.csv"
-            - name: "config"
-              mountPath: "/etc/lmb/refdata/firms.csv"
-              subPath: "firms.csv"
             - name: "logs"
               mountPath: "/var/log/lmb"
             - name: "scratch"
@@ -562,6 +605,11 @@ spec:
                   key: "cluster-secret"
             - name: "LMB_AERON_DIR"
               value: "/dev/shm/aeron"
+            - name: "LMB_SYMBOLS_TOKEN"
+              valueFrom:
+                secretKeyRef:
+                  name: "lmb-secrets"
+                  key: "controlplane-service-token"
           resources:
             requests:
               cpu: "4"
@@ -586,12 +634,6 @@ spec:
             - name: "config"
               mountPath: "/etc/lmb/topology.properties"
               subPath: "topology.properties"
-            - name: "config"
-              mountPath: "/etc/lmb/refdata/symbols.csv"
-              subPath: "symbols.csv"
-            - name: "config"
-              mountPath: "/etc/lmb/refdata/firms.csv"
-              subPath: "firms.csv"
             - name: "logs"
               mountPath: "/var/log/lmb"
             - name: "scratch"
@@ -789,11 +831,11 @@ spec:
                 secretKeyRef:
                   name: "lmb-secrets"
                   key: "db-password"
-            - name: "LMB_CONTROLPLANE_ADMINTOKEN"
+            - name: "LMB_CONTROLPLANE_SERVICETOKEN"
               valueFrom:
                 secretKeyRef:
                   name: "lmb-secrets"
-                  key: "admin-token"
+                  key: "controlplane-service-token"
           resources:
             requests:
               cpu: "2"
@@ -821,18 +863,15 @@ spec:
             - name: "config"
               mountPath: "/etc/lmb/topology.properties"
               subPath: "topology.properties"
-            - name: "config"
-              mountPath: "/etc/lmb/refdata/symbols.csv"
-              subPath: "symbols.csv"
-            - name: "config"
-              mountPath: "/etc/lmb/refdata/firms.csv"
-              subPath: "firms.csv"
             - name: "logs"
               mountPath: "/var/log/lmb"
             - name: "scratch"
               mountPath: "/var/lib/lmb"
             - name: "shm"
               mountPath: "/dev/shm"
+            - name: "operators"
+              mountPath: "/etc/lmb/operators"
+              readOnly: true
           readinessProbe:
             httpGet:
               path: "/metrics"
@@ -850,6 +889,10 @@ spec:
           emptyDir:
             medium: "Memory"
             sizeLimit: "2Gi"
+        - name: "operators"
+          secret:
+            secretName: "lmb-operators"
+            defaultMode: 288
         - name: "scratch"
           emptyDir:
             sizeLimit: "50Gi"
@@ -882,6 +925,202 @@ spec:
     matchLabels:
       app.kubernetes.io/name: "lmb"
       app.kubernetes.io/component: "controlplane"
+---
+apiVersion: "v1"
+kind: "Service"
+metadata:
+  name: "lmb-access"
+  namespace: "lmb"
+  labels:
+    app.kubernetes.io/name: "lmb"
+    app.kubernetes.io/component: "access"
+spec:
+  clusterIP: "None"
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: "lmb"
+    app.kubernetes.io/component: "access"
+  ports:
+    - name: "directory"
+      port: 9760
+      protocol: "TCP"
+    - name: "metrics"
+      port: 9770
+      protocol: "TCP"
+---
+apiVersion: "apps/v1"
+kind: "StatefulSet"
+metadata:
+  name: "lmb-access"
+  namespace: "lmb"
+  labels:
+    app.kubernetes.io/name: "lmb"
+    app.kubernetes.io/component: "access"
+spec:
+  serviceName: "lmb-access"
+  replicas: 2
+  podManagementPolicy: "Parallel"
+  updateStrategy:
+    type: "OnDelete"
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: "Retain"
+    whenScaled: "Retain"
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: "lmb"
+      app.kubernetes.io/component: "access"
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: "lmb"
+        app.kubernetes.io/component: "access"
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9770"
+    spec:
+      priorityClassName: "lmb-standard"
+      terminationGracePeriodSeconds: 60
+      enableServiceLinks: false
+      nodeSelector:
+        lmb.io/pool: "general"
+      tolerations:
+        - key: "lmb.io/dedicated"
+          operator: "Equal"
+          value: "general"
+          effect: "NoSchedule"
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        runAsNonRoot: true
+      containers:
+        - name: "access"
+          image: "registry.lmb.internal/lmb:0.1.0"
+          args:
+            - "access"
+          env:
+            - name: "POD_NAME"
+              valueFrom:
+                fieldRef:
+                  fieldPath: "metadata.name"
+            - name: "LMB_HEAP"
+              value: "1g"
+            - name: "LMB_EXTERNAL_DRIVER"
+              value: "0"
+            - name: "LMB_CLUSTER_SECRET"
+              valueFrom:
+                secretKeyRef:
+                  name: "lmb-secrets"
+                  key: "cluster-secret"
+            - name: "LMB_ACCESS_DB_URL"
+              valueFrom:
+                secretKeyRef:
+                  name: "lmb-secrets"
+                  key: "access-db-url"
+            - name: "LMB_ACCESS_DB_USER"
+              valueFrom:
+                secretKeyRef:
+                  name: "lmb-secrets"
+                  key: "access-db-user"
+            - name: "LMB_ACCESS_DB_PASSWORD"
+              valueFrom:
+                secretKeyRef:
+                  name: "lmb-secrets"
+                  key: "access-db-password"
+            - name: "LMB_ACCESS_SERVICETOKEN"
+              valueFrom:
+                secretKeyRef:
+                  name: "lmb-secrets"
+                  key: "access-service-token"
+          resources:
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+            limits:
+              cpu: "1"
+              memory: "2Gi"
+          ports:
+            - name: "directory"
+              containerPort: 9760
+              protocol: "TCP"
+            - name: "metrics"
+              containerPort: 9770
+              protocol: "TCP"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - "ALL"
+              add:
+                - "IPC_LOCK"
+                - "SYS_NICE"
+          volumeMounts:
+            - name: "config"
+              mountPath: "/etc/lmb/topology.properties"
+              subPath: "topology.properties"
+            - name: "logs"
+              mountPath: "/var/log/lmb"
+            - name: "scratch"
+              mountPath: "/var/lib/lmb"
+            - name: "shm"
+              mountPath: "/dev/shm"
+            - name: "operators"
+              mountPath: "/etc/lmb/operators"
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: "/metrics"
+              port: 9770
+            periodSeconds: 5
+            failureThreshold: 3
+      volumes:
+        - name: "config"
+          configMap:
+            name: "lmb-topology"
+        - name: "logs"
+          emptyDir:
+            sizeLimit: "20Gi"
+        - name: "shm"
+          emptyDir:
+            medium: "Memory"
+            sizeLimit: "2Gi"
+        - name: "operators"
+          secret:
+            secretName: "lmb-operators"
+            defaultMode: 288
+        - name: "scratch"
+          emptyDir:
+            sizeLimit: "50Gi"
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: "lmb"
+                  app.kubernetes.io/component: "access"
+              topologyKey: "kubernetes.io/hostname"
+      topologySpreadConstraints:
+        - maxSkew: 1
+          minDomains: 2
+          topologyKey: "topology.kubernetes.io/zone"
+          whenUnsatisfiable: "DoNotSchedule"
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: "lmb"
+              app.kubernetes.io/component: "access"
+---
+apiVersion: "policy/v1"
+kind: "PodDisruptionBudget"
+metadata:
+  name: "lmb-access"
+  namespace: "lmb"
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: "lmb"
+      app.kubernetes.io/component: "access"
 ---
 apiVersion: "v1"
 kind: "Service"
@@ -969,6 +1208,16 @@ spec:
                 secretKeyRef:
                   name: "lmb-secrets"
                   key: "cluster-secret"
+            - name: "LMB_POSTTRADE_ACCESS_TOKEN"
+              valueFrom:
+                secretKeyRef:
+                  name: "lmb-secrets"
+                  key: "access-service-token"
+            - name: "LMB_SYMBOLS_TOKEN"
+              valueFrom:
+                secretKeyRef:
+                  name: "lmb-secrets"
+                  key: "controlplane-service-token"
           resources:
             requests:
               cpu: "4"
@@ -996,12 +1245,6 @@ spec:
             - name: "config"
               mountPath: "/etc/lmb/topology.properties"
               subPath: "topology.properties"
-            - name: "config"
-              mountPath: "/etc/lmb/refdata/symbols.csv"
-              subPath: "symbols.csv"
-            - name: "config"
-              mountPath: "/etc/lmb/refdata/firms.csv"
-              subPath: "firms.csv"
             - name: "logs"
               mountPath: "/var/log/lmb"
             - name: "data"
@@ -1187,12 +1430,6 @@ spec:
             - name: "config"
               mountPath: "/etc/lmb/topology.properties"
               subPath: "topology.properties"
-            - name: "config"
-              mountPath: "/etc/lmb/refdata/symbols.csv"
-              subPath: "symbols.csv"
-            - name: "config"
-              mountPath: "/etc/lmb/refdata/firms.csv"
-              subPath: "firms.csv"
             - name: "logs"
               mountPath: "/var/log/lmb"
             - name: "data"
@@ -1353,12 +1590,6 @@ spec:
             - name: "config"
               mountPath: "/etc/lmb/topology.properties"
               subPath: "topology.properties"
-            - name: "config"
-              mountPath: "/etc/lmb/refdata/symbols.csv"
-              subPath: "symbols.csv"
-            - name: "config"
-              mountPath: "/etc/lmb/refdata/firms.csv"
-              subPath: "firms.csv"
             - name: "logs"
               mountPath: "/var/log/lmb"
             - name: "scratch"
@@ -1408,3 +1639,102 @@ spec:
     - name: "rest"
       port: 9700
       targetPort: 9700
+---
+apiVersion: "v1"
+kind: "Service"
+metadata:
+  name: "lmb-access-directory"
+  namespace: "lmb"
+spec:
+  selector:
+    app.kubernetes.io/name: "lmb"
+    app.kubernetes.io/component: "access"
+  ports:
+    - name: "directory"
+      port: 9760
+      targetPort: 9760
+---
+apiVersion: "v1"
+kind: "ConfigMap"
+metadata:
+  name: "lmb-fix-tls"
+  namespace: "lmb"
+data:
+  envoy.yaml: "admin:\n  address: {socket_address: {address: 127.0.0.1, port_value: 15201}}\nstatic_resources:\n  listeners:\n    - name: fix_tls\n      address: {socket_address: {address: 0.0.0.0, port_value: 9200}}\n      per_connection_buffer_limit_bytes: 65536\n      filter_chains:\n        - transport_socket:\n            name: envoy.transport_sockets.tls\n            typed_config:\n              \"@type\": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext\n              common_tls_context:\n                tls_params: {tls_minimum_protocol_version: TLSv1_2}\n                tls_certificates:\n                  - certificate_chain: {filename: /etc/lmb/tls/tls.crt}\n                    private_key: {filename: /etc/lmb/tls/tls.key}\n          filters:\n            - name: envoy.filters.network.tcp_proxy\n              typed_config:\n                \"@type\": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy\n                stat_prefix: fix_tls\n                cluster: artio\n                idle_timeout: 600s\n                access_log:\n                  - name: envoy.access_loggers.stdout\n                    typed_config:\n                      \"@type\": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog\n  clusters:\n    - name: artio\n      type: STATIC\n      connect_timeout: 1s\n      load_assignment:\n        cluster_name: artio\n        endpoints:\n          - lb_endpoints:\n              - endpoint: {address: {socket_address: {address: 127.0.0.1, port_value: 9201}}}\n"
+---
+apiVersion: "networking.k8s.io/v1"
+kind: "NetworkPolicy"
+metadata:
+  name: "lmb-controlplane-ingress"
+  namespace: "lmb"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: "lmb"
+      app.kubernetes.io/component: "controlplane"
+  policyTypes:
+    - "Ingress"
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: "lmb-ops"
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: "lmb"
+              app.kubernetes.io/component: "controlplane"
+      ports:
+        - protocol: "TCP"
+          port: 9700
+    - from:
+        - ipBlock:
+            cidr: "10.20.0.0/16"
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: "lmb"
+              app.kubernetes.io/component: "posttrade"
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: "lmb"
+              app.kubernetes.io/component: "consolidator"
+      ports:
+        - protocol: "TCP"
+          port: 9700
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: "monitoring"
+      ports:
+        - protocol: "TCP"
+          port: 9710
+---
+apiVersion: "networking.k8s.io/v1"
+kind: "NetworkPolicy"
+metadata:
+  name: "lmb-access-ingress"
+  namespace: "lmb"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: "lmb"
+      app.kubernetes.io/component: "access"
+  policyTypes:
+    - "Ingress"
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: "10.20.0.0/16"
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: "lmb"
+              app.kubernetes.io/component: "posttrade"
+      ports:
+        - protocol: "TCP"
+          port: 9760
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: "monitoring"
+      ports:
+        - protocol: "TCP"
+          port: 9770

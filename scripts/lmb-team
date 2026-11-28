@@ -1,0 +1,204 @@
+#!/usr/bin/env python3
+"""Operator CLI for teams (firms), their members' sessions, API keys and throttle tiers.
+
+Talks to the access service's operator API and, for a new team's risk limits, to the control plane.
+
+  lmb-team list                                     teams, sessions and keys (no secrets)
+  lmb-team show <firmId>
+  lmb-team register <firmId> <name> --member alice --member bob [--tier standard] [--scopes TRADE,QUERY]
+                    --credit-limit <cents> --max-position <shares>   (or --no-limits: access service only)
+  lmb-team add-member <firmId> <label> [--session-id N] [--tier T] [--scopes ...] [--no-key]
+  lmb-team issue-key <firmId> --scopes CANCEL [--session-id N] [--label L] [--expires-in-days D]
+  lmb-team rotate <keyId> [--grace-hours H]         new key now, the old one keeps working H hours (default 24)
+  lmb-team revoke <keyId>                           its connections end within ~3 s (gateway poll + check)
+  lmb-team keys [<firmId>]
+  lmb-team enable|disable <firmId>                  credentials only (risk kill switch: control plane /kill)
+  lmb-team enable-session|disable-session <sessionId>
+  lmb-team set-tier <firmId> <tier>  |  set-session-tier <sessionId> <tier|->
+  lmb-team tiers  |  put-tier <name> <ordersPerSec> <orderBurst> <messagesPerSec> <messageBurst>
+  lmb-team audit [N]
+
+Environment: LMB_ACCESS_URL (http://127.0.0.1:9750), LMB_ACCESS_TOKEN or LMB_ACCESS_TOKEN_FILE (local default
+lmb-local-admin), LMB_CONTROLPLANE_URL (http://127.0.0.1:9700), LMB_CONTROLPLANE_TOKEN or
+LMB_CONTROLPLANE_TOKEN_FILE. Keys are printed once, when issued: hand them over then; only their hashes are kept.
+Scopes: TRADE (new/replace/cancel), CANCEL (cancels only), QUERY (order and session queries), DROP_COPY.
+"""
+import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+
+def token(var, default):
+    f = os.environ.get(var + "_FILE")
+    if f:
+        with open(f, encoding="utf-8") as fh:
+            return fh.read().strip()
+    return os.environ.get(var, default)
+
+
+ACCESS = os.environ.get("LMB_ACCESS_URL", "http://127.0.0.1:9750").rstrip("/")
+CP = os.environ.get("LMB_CONTROLPLANE_URL", "http://127.0.0.1:9700").rstrip("/")
+
+
+def call(base, tok, method, path, body=None):
+    data = None if body is None else json.dumps(body).encode()
+    req = urllib.request.Request(base + path, data=data, method=method,
+                                 headers={"Authorization": "Bearer " + tok, "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            text = r.read().decode()
+            return json.loads(text) if text else None
+    except urllib.error.HTTPError as e:
+        text = e.read().decode()
+        try:
+            msg = json.loads(text).get("error") or text
+        except ValueError:
+            msg = text
+        sys.exit(f"lmb-team: {method} {base}{path}: HTTP {e.code}: {msg}")
+    except urllib.error.URLError as e:
+        sys.exit(f"lmb-team: cannot reach {base}: {e.reason}")
+
+
+def access(method, path, body=None):
+    return call(ACCESS, token("LMB_ACCESS_TOKEN", "lmb-local-admin"), method, path, body)
+
+
+def controlplane(method, path, body=None):
+    return call(CP, token("LMB_CONTROLPLANE_TOKEN", "lmb-local-admin"), method, path, body)
+
+
+def scopes(s):
+    return [x.strip().upper() for x in s.split(",") if x.strip()] if s else None
+
+
+def show(x):
+    print(json.dumps(x, indent=2))
+
+
+def print_keys(members_or_keys):
+    for m in members_or_keys:
+        k = m.get("key", m)
+        if k and k.get("apiKey"):
+            who = f"session {m['sessionId']} ({m.get('label')})" if "label" in m and "key" in m else f"key {k['keyId']}"
+            print(f"  {who}: {k['apiKey']}   scopes {','.join(k['scopes'])}")
+
+
+def main():
+    p = argparse.ArgumentParser(prog="lmb-team", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("list")
+    x = sub.add_parser("show"); x.add_argument("firm", type=int)
+    x = sub.add_parser("register")
+    x.add_argument("firm", type=int); x.add_argument("name")
+    x.add_argument("--member", action="append", default=[]); x.add_argument("--tier")
+    x.add_argument("--scopes"); x.add_argument("--credit-limit", type=int); x.add_argument("--max-position", type=int)
+    x.add_argument("--no-limits", action="store_true")
+    x = sub.add_parser("add-member")
+    x.add_argument("firm", type=int); x.add_argument("label"); x.add_argument("--session-id", type=int)
+    x.add_argument("--tier"); x.add_argument("--scopes"); x.add_argument("--no-key", action="store_true")
+    x = sub.add_parser("issue-key")
+    x.add_argument("firm", type=int); x.add_argument("--scopes", required=True); x.add_argument("--session-id", type=int)
+    x.add_argument("--label"); x.add_argument("--expires-in-days", type=float)
+    x = sub.add_parser("rotate"); x.add_argument("key"); x.add_argument("--grace-hours", type=float)
+    x = sub.add_parser("revoke"); x.add_argument("key")
+    x = sub.add_parser("keys"); x.add_argument("firm", type=int, nargs="?")
+    for c in ("enable", "disable"):
+        x = sub.add_parser(c); x.add_argument("firm", type=int)
+    for c in ("enable-session", "disable-session"):
+        x = sub.add_parser(c); x.add_argument("session", type=int)
+    x = sub.add_parser("set-tier"); x.add_argument("firm", type=int); x.add_argument("tier")
+    x = sub.add_parser("set-session-tier"); x.add_argument("session", type=int); x.add_argument("tier")
+    sub.add_parser("tiers")
+    x = sub.add_parser("put-tier")
+    x.add_argument("name"); x.add_argument("orders", type=float); x.add_argument("order_burst", type=int)
+    x.add_argument("messages", type=float); x.add_argument("message_burst", type=int)
+    x = sub.add_parser("audit"); x.add_argument("n", type=int, nargs="?", default=50)
+    a = p.parse_args()
+
+    if a.cmd == "list":
+        for f in access("GET", "/api/firms"):
+            state = "" if f["enabled"] else "  DISABLED"
+            print(f"{f['firmId']:>6}  {f['name']}  tier {f['tier']}{state}")
+            for s in f["sessions"]:
+                print(f"        session {s['sessionId']}  {s['label']}" + (f"  tier {s['tier']}" if s["tier"] else "") +
+                      ("" if s["enabled"] else "  DISABLED"))
+            for k in f["keys"]:
+                bound = f"session {k['sessionId']}" if k["sessionId"] else "firm-wide"
+                print(f"        key {k['keyId']}  {k['status']}  {bound}  {','.join(k['scopes'])}  {k['label']}")
+    elif a.cmd == "show":
+        show(access("GET", f"/api/firms/{a.firm}"))
+    elif a.cmd == "register":
+        if not a.no_limits:
+            if a.credit_limit is None or a.max_position is None:
+                sys.exit("lmb-team: register needs --credit-limit and --max-position (risk limits, control plane), or --no-limits")
+            r = controlplane("POST", "/api/firms", {"firmId": a.firm, "name": a.name, "creditLimit": a.credit_limit,
+                                                    "maxPositionPerSymbol": a.max_position})
+            print(f"control plane: firm {a.firm} limits {r.get('status')}" + (f" ({r['note']})" if r.get("note") else ""))
+        body = {"firmId": a.firm, "name": a.name, "members": [{"label": m} for m in a.member]}
+        if a.tier:
+            body["tier"] = a.tier
+        if a.scopes:
+            body["scopes"] = scopes(a.scopes)
+        r = access("POST", "/api/firms", body)
+        print(f"access: team {r['firmId']} '{r['name']}' tier {r['tier']}, keys (shown once):")
+        print_keys(r["members"])
+    elif a.cmd == "add-member":
+        body = {"label": a.label}
+        if a.session_id:
+            body["sessionId"] = a.session_id
+        if a.tier:
+            body["tier"] = a.tier
+        if a.no_key:
+            body["key"] = False
+        elif a.scopes:
+            body["scopes"] = scopes(a.scopes)
+        r = access("POST", f"/api/firms/{a.firm}/sessions", body)
+        print(f"session {r['members'][0]['sessionId']} added to firm {a.firm}")
+        print_keys(r["members"])
+    elif a.cmd == "issue-key":
+        body = {"scopes": scopes(a.scopes)}
+        if a.session_id:
+            body["sessionId"] = a.session_id
+        if a.label:
+            body["label"] = a.label
+        if a.expires_in_days:
+            body["expiresInMs"] = int(a.expires_in_days * 86_400_000)
+        print_keys([access("POST", f"/api/firms/{a.firm}/keys", body)])
+    elif a.cmd == "rotate":
+        body = {} if a.grace_hours is None else {"graceMs": int(a.grace_hours * 3_600_000)}
+        k = access("POST", f"/api/keys/{a.key}/rotate", body)
+        print(f"key {a.key} replaced by {k['keyId']}; the old key stops working at the end of the grace period")
+        print_keys([k])
+    elif a.cmd == "revoke":
+        k = access("DELETE", f"/api/keys/{a.key}")
+        print(f"key {k['keyId']} {k['status']}")
+    elif a.cmd == "keys":
+        show(access("GET", "/api/keys" + (f"?firmId={a.firm}" if a.firm else "")))
+    elif a.cmd in ("enable", "disable"):
+        f = access("PUT", f"/api/firms/{a.firm}", {"enabled": a.cmd == "enable"})
+        print(f"firm {a.firm} credentials {'enabled' if f['enabled'] else 'disabled'}")
+    elif a.cmd in ("enable-session", "disable-session"):
+        s = access("PUT", f"/api/sessions/{a.session}", {"enabled": a.cmd == "enable-session"})
+        print(f"session {a.session} {'enabled' if s['enabled'] else 'disabled'}")
+    elif a.cmd == "set-tier":
+        print(f"firm {a.firm} tier {access('PUT', f'/api/firms/{a.firm}', {'tier': a.tier})['tier']} (next logon)")
+    elif a.cmd == "set-session-tier":
+        s = access("PUT", f"/api/sessions/{a.session}", {"tier": None if a.tier == "-" else a.tier})
+        print(f"session {a.session} tier {s['tier'] or '(the firm' + chr(39) + 's)'} (next logon)")
+    elif a.cmd == "tiers":
+        for t in access("GET", "/api/tiers"):
+            print(f"{t['name']:>12}  orders {t['orderRatePerSec']:g}/s burst {t['orderBurst']}"
+                  f"  messages {t['messageRatePerSec']:g}/s burst {t['messageBurst']}")
+    elif a.cmd == "put-tier":
+        show(access("PUT", f"/api/tiers/{a.name}", {"orderRatePerSec": a.orders, "orderBurst": a.order_burst,
+                                                     "messageRatePerSec": a.messages, "messageBurst": a.message_burst}))
+    elif a.cmd == "audit":
+        for e in access("GET", f"/api/audit?limit={a.n}"):
+            print(f"{e['auditId']:>6}  {e['tsMs']}  {e['actor']:<16} {e['action']:<14} {e['detail']}")
+
+
+if __name__ == "__main__":
+    main()

@@ -9,6 +9,7 @@ import io.aeron.logbuffer.ControlledFragmentHandler.Action;
 import io.lmb.fix.FixDictionaryImpl;
 import io.lmb.fix.OrdType;
 import io.lmb.fix.Side;
+import io.lmb.fix.builder.LogonEncoder;
 import io.lmb.fix.builder.NewOrderSingleEncoder;
 import io.lmb.fix.builder.OrderCancelRequestEncoder;
 import io.lmb.fix.builder.OrderMassCancelRequestEncoder;
@@ -19,6 +20,8 @@ import org.agrona.concurrent.BackoffIdleStrategy;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import uk.co.real_logic.artio.Reply;
+import uk.co.real_logic.artio.builder.AbstractLogonEncoder;
+import uk.co.real_logic.artio.builder.AbstractLogoutEncoder;
 import uk.co.real_logic.artio.engine.EngineConfiguration;
 import uk.co.real_logic.artio.engine.FixEngine;
 import uk.co.real_logic.artio.fields.UtcTimestampEncoder;
@@ -29,6 +32,7 @@ import uk.co.real_logic.artio.library.SessionConfiguration;
 import uk.co.real_logic.artio.library.SessionHandler;
 import uk.co.real_logic.artio.messages.DisconnectReason;
 import uk.co.real_logic.artio.session.Session;
+import uk.co.real_logic.artio.session.SessionCustomisationStrategy;
 
 import java.io.File;
 import java.nio.charset.StandardCharsets;
@@ -152,6 +156,45 @@ class FixGatewayTest
         grpc.logon(100, 1001, "alpha-key"); // the session id was never taken
     }
 
+    @Test
+    void fixCancelOnDisconnectTypesAndWindow() throws Exception
+    {
+        final Gateway g = fixGateway();
+        final FixClient onDisconnect = new FixClient("cod1");
+        fixClients.add(onDisconnect);
+        onDisconnect.codType = 1;
+        final FixClient onLogout = new FixClient("cod2");
+        fixClients.add(onLogout);
+        onLogout.codType = 2;
+        final Session s1 = onDisconnect.logon(g, "1001", "100", "alpha-key");
+        final Session s2 = onLogout.logon(g, "1002", "100", "alpha-key");
+        assertTrue(s1 != null && s1.isActive() && s2 != null && s2.isActive());
+        onDisconnect.newOrder(s1, "31", "AAPL", Side.BUY, 10, 19000);
+        onDisconnect.await(m -> "8".equals(m.get(35)) && "31".equals(m.get(11)));
+        onLogout.newOrder(s2, "32", "GOOG", Side.BUY, 10, 17000);
+        onLogout.await(m -> "8".equals(m.get(35)) && "32".equals(m.get(11)));
+
+        // type 1 ignores a logout, type 2 acts on one
+        onDisconnect.logout(s1);
+        onLogout.logout(s2);
+        Fixture.await(() -> fx.machines[1].openOrders(1002) == 0, "type 2 cancels on logout");
+        Thread.sleep(300);
+        assertEquals(1, fx.machines[0].openOrders(1001), "type 1 keeps the orders on a logout");
+
+        // type 1 with a window: a lost connection cancels once the window is over
+        onDisconnect.codWindowMs = 600;
+        final Session again = onDisconnect.logon(g, "1001", "100", "alpha-key");
+        assertTrue(again != null && again.isActive());
+        onDisconnect.newOrder(again, "33", "AAPL", Side.BUY, 10, 19000);
+        onDisconnect.await(m -> "8".equals(m.get(35)) && "33".equals(m.get(11)));
+        final long lost = System.currentTimeMillis();
+        onDisconnect.drop(again);
+        assertEquals(2, fx.machines[0].openOrders(1001), "inside the window");
+        Fixture.await(() -> fx.machines[0].openOrders(1001) == 0, "type 1 cancels on a lost connection");
+        assertTrue(System.currentTimeMillis() - lost >= 500, "after the window");
+        assertEquals(2, g.metrics().cancelOnDisconnects() / fx.machines.length);
+    }
+
     /** An initiator: its own media driver, archive, engine and library, polled by the test thread. */
     static final class FixClient implements AutoCloseable
     {
@@ -160,6 +203,9 @@ class FixGatewayTest
         private final FixLibrary library;
         private final List<Map<Integer, String>> received = new ArrayList<>();
         private final UtcTimestampEncoder ts = new UtcTimestampEncoder();
+        /** CancelOnDisconnectType (35002) and window (35003) of the next logons; 0 = not sent. */
+        volatile int codType;
+        volatile int codWindowMs;
 
         FixClient(final String name)
         {
@@ -190,6 +236,25 @@ class FixGatewayTest
             final LibraryConfiguration lc = new LibraryConfiguration()
                 .sessionAcquireHandler((session, info) -> new Handler())
                 .libraryAeronChannels(List.of("aeron:ipc"));
+            // initiator sessions live in the library: their logon is built from the library's configuration
+            lc.sessionCustomisationStrategy(new SessionCustomisationStrategy()
+                {
+                    public void configureLogon(final AbstractLogonEncoder logon, final long sessionId)
+                    {
+                        if (codType != 0)
+                        {
+                            ((LogonEncoder)logon).cancelOnDisconnectType(codType);
+                        }
+                        if (codWindowMs != 0)
+                        {
+                            ((LogonEncoder)logon).cODTimeoutWindow(codWindowMs);
+                        }
+                    }
+
+                    public void configureLogout(final AbstractLogoutEncoder logout, final long sessionId)
+                    {
+                    }
+                });
             lc.monitoringFile(new File(base, "lib-monitoring").getAbsolutePath());
             lc.aeronContext().aeronDirectoryName(aeronDir);
             library = FixLibrary.connect(lc);
@@ -264,6 +329,35 @@ class FixGatewayTest
             final int len = timestamp();
             e.clOrdID(clOrdId).massCancelRequestType(io.lmb.fix.MassCancelRequestType.CANCEL_ALL_ORDERS).transactTime(ts.buffer(), len);
             send(s, e);
+        }
+
+        void logout(final Session s)
+        {
+            s.logoutAndDisconnect();
+            pollUntilClosed(s);
+        }
+
+        /** Drops the TCP connection without a Logout. */
+        void drop(final Session s)
+        {
+            s.requestDisconnect();
+            pollUntilClosed(s);
+        }
+
+        private void pollUntilClosed(final Session s)
+        {
+            final long deadline = System.currentTimeMillis() + 5_000;
+            while (s.isConnected() && System.currentTimeMillis() < deadline)
+            {
+                library.poll(10);
+            }
+            assertFalse(s.isConnected(), "session closed");
+            // the library still has to send the Logout / close the socket through the engine
+            final long settle = System.currentTimeMillis() + 300;
+            while (System.currentTimeMillis() < settle)
+            {
+                library.poll(10);
+            }
         }
 
         private void send(final Session s, final uk.co.real_logic.artio.builder.Encoder e)

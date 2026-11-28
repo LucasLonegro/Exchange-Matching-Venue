@@ -389,7 +389,8 @@ class GatewayGrpcTest
         {
             final ScriptedShard.Command c = m.commands().stream()
                 .filter(x -> x.templateId() == MassCancelDecoder.TEMPLATE_ID).findFirst().orElseThrow();
-            assertEquals(MassCancelScope.SESSION, c.scope());
+            assertEquals(MassCancelScope.SESSION_GATEWAY, c.scope());
+            assertEquals(1, c.targetGatewayId(), "only what the session entered through this gateway");
             assertEquals(CancelReason.DISCONNECT, c.reason());
         }
 
@@ -507,7 +508,7 @@ class GatewayGrpcTest
 
             final StatusRuntimeException denied = assertThrows(StatusRuntimeException.class,
                 () -> query(ch, "beta-key").getOrder(GetOrderRequest.newBuilder().setFirmId(100).setClOrdId(1).build()));
-            assertEquals(Status.Code.UNAUTHENTICATED, denied.getStatus().getCode());
+            assertEquals(Status.Code.PERMISSION_DENIED, denied.getStatus().getCode());
 
             assertEquals(3, query(ch, null).listSymbols(ListSymbolsRequest.getDefaultInstance()).getSymbolsCount());
 

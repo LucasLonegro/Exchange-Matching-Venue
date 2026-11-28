@@ -65,15 +65,17 @@ fi
 TOPO="$LMB_LOCAL_DATA/run/topology.properties"
 [ -f "$TOPO" ] || { echo "no running venue topology at $TOPO" >&2; exit 1; }
 
-# The control plane opens the market (autoOpen) shortly after it defines the symbols; wait for it.
+# The control plane opens the market (autoOpen) shortly after it defines the seeded symbols; wait for all of them.
 CP_PORT="$(grep -E '^lmb.controlplane.0.restPort=' "$TOPO" | tail -1 | cut -d= -f2)"
+n=0; total=0
 for _ in $(seq 1 60); do
-  n="$(curl -s -H 'X-LMB-Admin-Token: lmb-local-admin' "http://127.0.0.1:${CP_PORT:-9700}/api/symbols" \
-       | grep -o '"shardState":"CONTINUOUS"' | wc -l || true)"
-  [ "${n:-0}" -gt 0 ] && [ "$n" -eq "$(($(wc -l < "$ROOT/deploy/local/symbols.csv") - 1))" ] && break
+  body="$(curl -s -H 'X-LMB-Admin-Token: lmb-local-admin' "http://127.0.0.1:${CP_PORT:-9700}/api/symbols" || true)"
+  total="$(grep -o '"status":"ACTIVE"' <<< "$body" | wc -l || true)"
+  n="$(grep -o '"shardState":"CONTINUOUS"' <<< "$body" | wc -l || true)"
+  [ "${n:-0}" -gt 0 ] && [ "$n" -eq "$total" ] && break
   sleep 0.5
 done
-echo "==> $n symbols CONTINUOUS according to the control plane"
+echo "==> $n of $total symbols CONTINUOUS according to the control plane"
 
 run_tool() {  # run_tool <log> <main> args...
   local log="$1"; shift

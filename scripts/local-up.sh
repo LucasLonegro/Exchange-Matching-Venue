@@ -10,8 +10,9 @@
 #   scripts/local-up.sh --dry-run        print the exact commands, start nothing
 #   scripts/local-up.sh --restart gateway-1    relaunch one process with its saved command
 #
-# Start order: shard nodes -> wait for a leader per shard -> control plane -> consolidators and feed
-# simulator -> market data -> gateways -> post-trade -> ledger -> replayers. Each process must print
+# Start order: shard nodes -> wait for a leader per shard -> control plane -> access service -> seed
+# (scripts/local-seed: symbols, risk accounts, teams and their keys, through the APIs) -> consolidators and
+# feed simulator -> market data -> gateways -> post-trade -> ledger -> replayers. Each process must print
 # "LMB_READY <service> <instance>" within the tier timeout; otherwise the run is torn down (unless
 # --keep-on-failure) and the tail of the failing log is printed.
 #
@@ -26,7 +27,7 @@
 #   --heap <target>=256m              max heap
 # The env files are sourced by bash with `set -a`. Besides any LMB_<KEY> config they may set
 # LMB_HEAP, LMB_JAVA_OPTS (JVM flags; append to it), LMB_COMMON_ARGS / LMB_EXTRA_ARGS (-D arguments).
-# Service names: node gateway marketdata consolidator feedsim controlplane posttrade ledger replayer.
+# Service names: node gateway marketdata consolidator feedsim controlplane access posttrade ledger replayer.
 set -euo pipefail
 # shellcheck source=lib/local-common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib/local-common.sh"
@@ -36,6 +37,7 @@ Options:
   --shards N --members N --gateways N --md N --consolidators N --controlplanes N
   --minimal               1 shard x 1 member, one instance of each service, no post-trade or ledger
   --no-posttrade --no-ledger --no-replayer --no-marketdata --no-gateways
+  --no-seed               do not run scripts/local-seed (symbols, firms, teams and keys come only from you)
   --consolidators N --with-feedsim   also run NBBO consolidators and the feed simulator (legacy, external-market mode)
   --skip <name|service>   do not start it (repeatable)
   --full                  use deploy/local/full.env (start the infrastructure first:
@@ -59,7 +61,7 @@ EOF
 # ---- arguments ---------------------------------------------------------------------------------------
 BASE_TOPO="$LMB_ROOT/deploy/local/topology.properties"
 SHARDS=""; MEMBERS=""; GATEWAYS=""; MDS=""; CONS=""; CPS=""
-WITH_POSTTRADE=1; WITH_LEDGER=1; WITH_REPLAYER=1; WITH_FEEDSIM=0
+WITH_POSTTRADE=1; WITH_LEDGER=1; WITH_REPLAYER=1; WITH_FEEDSIM=0; SEED=1
 FULL=0; DRY_RUN=0; FORCE=0; KEEP_ON_FAILURE=0; STRICT_LEADERS=0
 TIER_TIMEOUT=120; LEADER_TIMEOUT=60
 RESTART=""
@@ -79,6 +81,7 @@ while [ $# -gt 0 ]; do
     --minimal)        SHARDS=1; MEMBERS=1; GATEWAYS=1; MDS=1; CONS=0; CPS=1; WITH_POSTTRADE=0; WITH_LEDGER=0 ;;
     --no-posttrade)   WITH_POSTTRADE=0 ;;
     --no-ledger)      WITH_LEDGER=0 ;;
+    --no-seed)        SEED=0 ;;
     --no-replayer|--no-replayers) WITH_REPLAYER=0 ;;
     --no-feedsim)     WITH_FEEDSIM=0 ;;
     --with-feedsim)   WITH_FEEDSIM=1 ;;
@@ -202,6 +205,8 @@ for ((s = 0; s < SHARDS; s++)); do
   done
 done
 for ((i = 0; i < CPS; i++)); do plan controlplane "controlplane-$i" controlplane "-Dlmb.instance.id=$i"; done
+# credentials: before the gateways and the drop copy, which poll it (they fall back to their cached copy)
+plan access access-0 access "-Dlmb.instance.id=0"
 for ((i = 0; i < CONS; i++)); do plan feeds "consolidator-$i" consolidator "-Dlmb.instance.id=$i"; done
 [ "$WITH_FEEDSIM" -eq 1 ] && plan feeds feedsim-0 feedsim "-Dlmb.instance.id=0"
 for ((i = 0; i < MDS; i++)); do plan marketdata "marketdata-$i" marketdata "-Dlmb.instance.id=$i"; done
@@ -225,23 +230,12 @@ else
 fi
 
 # ---- generated run configuration -------------------------------------------------------------------------
-# Writes into $1: topology.properties (base + profile overrides + absolute reference data paths) and,
-# when the shard count differs from the base, a symbols.csv whose symbols are spread over the shards.
+# Writes $1/topology.properties: base + profile overrides. No reference data files: symbols, firms and teams live
+# in the control plane's and the access service's databases (scripts/local-seed fills them through the APIs).
 generate_run_config() {
-  local out="$1" sym firms base_shards col
+  local out="$1" url
   mkdir -p "$out"
-  sym="$(topo_get lmb.symbols deploy/local/symbols.csv)"; [[ "$sym" = /* ]] || sym="$LMB_ROOT/$sym"
-  firms="$(topo_get lmb.firms deploy/local/firms.csv)";   [[ "$firms" = /* ]] || firms="$LMB_ROOT/$firms"
-  [ -f "$sym" ] || die "symbols file not found: $sym"
-  [ -f "$firms" ] || die "firms file not found: $firms"
-  base_shards="$(shard_count)"
-  if [ "$SHARDS" != "$base_shards" ]; then
-    col="$(head -n1 "$sym" | tr ',' '\n' | grep -nx 'shard' | cut -d: -f1)"
-    [ -n "$col" ] || die "no 'shard' column in $sym"
-    awk -F, -v OFS=, -v c="$col" -v n="$SHARDS" 'NR == 1 { print; next } NF { $c = (NR - 2) % n; print }' \
-      "$sym" > "$out/symbols.csv"
-    sym="$LMB_RUN_DIR/symbols.csv"
-  fi
+  url="http://127.0.0.1:$(topo_get lmb.access.internalPort 9760)"
   {
     echo "# GENERATED by scripts/local-up.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ); rewritten on every start."
     echo "# Base: ${BASE_TOPO#"$LMB_ROOT/"}. Every service of this run reads this file (-Dlmb.topology)."
@@ -255,9 +249,24 @@ generate_run_config() {
     echo "lmb.md.instances=$MDS"
     echo "lmb.consolidators=$CONS"
     echo "lmb.controlplane.instances=$CPS"
-    echo "lmb.symbols=$sym"
-    echo "lmb.firms=$firms"
+    echo "# credentials from the access service, symbols from the control plane (local tokens)"
+    echo "lmb.gateway.access.url=$url"
+    echo "lmb.posttrade.access.url=$url"
+    echo "# the keys scripts/local-seed issued, for the tools (SmokeTestMain, LoadGeneratorMain)"
+    echo "lmb.tools.credentials=$LMB_DATA/credentials.json"
   } > "$out/topology.properties"
+}
+
+# seed: symbols spread over the shards and risk accounts (control plane), teams and keys (access service)
+run_seed() {
+  local cp_url acc_args=()
+  cp_url="http://127.0.0.1:$(topo_get lmb.controlplane.0.restPort 9700)"
+  skipped access-0 || acc_args=(--access "http://127.0.0.1:$(topo_get lmb.access.adminPort 9750)")
+  info "seeding symbols, firms, teams and keys through the APIs (scripts/local-seed)"
+  if ! python3 "$LMB_ROOT/scripts/local-seed" --controlplane "$cp_url" ${acc_args[@]+"${acc_args[@]}"} --shards "$SHARDS" \
+       --credentials "$LMB_DATA/credentials.json" 2>&1 | sed 's/^/    /'; then
+    FAILED_NAMES=(seed); err "scripts/local-seed failed"; on_failure
+  fi
 }
 
 q() { printf '%q' "$1"; }
@@ -449,7 +458,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
   info "dry run: profile ${SHARDS} shard(s) x ${MEMBERS} member(s); $NOTE_MEMBERS"
   info "would write $LMB_TOPO_FILE:"
   sed 's/^/    /' "$TMP/topology.properties"
-  [ -f "$TMP/symbols.csv" ] && { info "would write $LMB_RUN_DIR/symbols.csv:"; sed 's/^/    /' "$TMP/symbols.csv"; }
+  [ "$SEED" -eq 1 ] && info "after the control plane and access tiers: scripts/local-seed --shards $SHARDS --credentials $LMB_DATA/credentials.json"
   tier=""
   for e in "${PLAN[@]}"; do
     set -- $e; t="$1"; name="$2"; svc="$3"; shift 3
@@ -508,11 +517,19 @@ info "starting ${#PLAN[@]} processes from $LMB_ROOT (data: $LMB_DATA)"
 log "    profile: ${SHARDS} shard(s) x ${MEMBERS} member(s), ${GATEWAYS} gateway(s), ${MDS} MD, ${CONS} consolidator(s), ${CPS} control plane(s); $NOTE_MEMBERS"
 [ "$(basename "$LMB_RUNNER")" = lmb-run ] || warn "runner is $LMB_RUNNER (not the JVM)"
 START_ALL=$SECONDS
+SEED_AFTER=""
+if [ "$SEED" -eq 1 ]; then
+  for tier in $(started_tiers); do case "$tier" in controlplane|access) SEED_AFTER="$tier" ;; esac; done
+  [ -n "$SEED_AFTER" ] || warn "no control plane in this run: not seeding (scripts/local-seed)"
+fi
 for tier in $(started_tiers); do
   mapfile -t names < <(names_in_tier "$tier")
   info "tier $tier: ${names[*]}"
   for name in "${names[@]}"; do launch "$name"; done
   wait_ready "$TIER_TIMEOUT" "${names[@]}" || on_failure
+  if [ "$tier" = "$SEED_AFTER" ]; then
+    if [ "$(basename "$LMB_RUNNER")" = lmb-run ]; then run_seed; else warn "runner is not the JVM: not seeding"; fi
+  fi
   if [ "$tier" = nodes ]; then
     info "waiting for a leader in each shard (timeout ${LEADER_TIMEOUT}s)"
     for ((s = 0; s < SHARDS; s++)); do
@@ -549,6 +566,8 @@ for name in $(started_names); do
                     log "    $name  admin REST http://$(host_of "$name"):$(topo_get "lmb.controlplane.$i.restPort" $((9700 + i)))/" ;;
     posttrade-*)    log "    $name  FIX drop copy 127.0.0.1:$(topo_get lmb.posttrade.dropCopyFixPort 9800)" ;;
     ledger-*)       log "    $name  daily statements in $LMB_DATA/ledger/${name#ledger-}/statements" ;;
+    access-*)       i="${name#access-}"
+                    log "    $name  teams and keys http://127.0.0.1:$(( $(topo_get lmb.access.adminPort 9750) + i ))/api/firms  (scripts/lmb-team)" ;;
   esac
 done
 log "    metrics: http://127.0.0.1:<port>/metrics (scripts/local-status.sh --probe lists them)"

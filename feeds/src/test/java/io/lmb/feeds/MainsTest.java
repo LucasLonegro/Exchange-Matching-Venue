@@ -15,10 +15,9 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.time.Duration;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.CompletableFuture;
@@ -71,20 +70,13 @@ class MainsTest
     @Test
     void simulatorQuotesBecomeReferencePricesOnTheOwningShardAndBothEndpointsServeMetrics() throws Exception
     {
-        final Path dir = Path.of("target", "mains-test");
-        Files.createDirectories(dir);
-        final Path csv = dir.resolve("symbols.csv");
-        Files.writeString(csv, """
-            symbolId,ticker,shard,tickSize,lotSize,referencePrice,priceBandBps,maxOrderQty
-            1,AAA,0,1,1,19000,1000,100000
-            2,BBB,1,1,1,42000,1000,100000
-            3,CCC,0,5,1,5000,1000,100000
-            4,DDD,1,1,1,2500,1000,100000
-            5,EEE,1,10,1,100000,1000,100000
-            """);
-        final SymbolDirectory symbols = SymbolDirectory.load(csv);
+        final SymbolDirectory symbols = new SymbolDirectory(List.of(
+            new SymbolDirectory.Symbol(1, "AAA", 0, 1, 1, 19000, 1000, 100000),
+            new SymbolDirectory.Symbol(2, "BBB", 1, 1, 1, 42000, 1000, 100000),
+            new SymbolDirectory.Symbol(3, "CCC", 0, 5, 1, 5000, 1000, 100000),
+            new SymbolDirectory.Symbol(4, "DDD", 1, 1, 1, 2500, 1000, 100000),
+            new SymbolDirectory.Symbol(5, "EEE", 1, 10, 1, 100000, 1000, 100000)));
         final Properties p = new Properties();
-        p.setProperty("lmb.symbols", csv.toString());
         p.setProperty("lmb.consolidators", "1");
         p.setProperty("lmb.consolidator.0.metricsPort", Integer.toString(CONSOLIDATOR_METRICS));
         p.setProperty("lmb.consolidator.0.feedBasePort", Integer.toString(FEED_BASE));
@@ -98,7 +90,7 @@ class MainsTest
         final ByteArrayOutputStream stdout = new ByteArrayOutputStream();
         final PrintStream out = new PrintStream(stdout, true, StandardCharsets.UTF_8);
 
-        try (ConsolidatorMain consolidator = ConsolidatorMain.start(topology, 0, venue, new SystemEpochNanoClock()))
+        try (ConsolidatorMain consolidator = ConsolidatorMain.start(topology, 0, symbols, venue, new SystemEpochNanoClock()))
         {
             final CompletableFuture<Boolean> ready = CompletableFuture.supplyAsync(() ->
             {
@@ -118,7 +110,7 @@ class MainsTest
             assertTrue(ready.get(10, TimeUnit.SECONDS));
             assertEquals("LMB_READY consolidator 0" + System.lineSeparator(), stdout.toString(StandardCharsets.UTF_8));
 
-            try (FeedSimulatorMain sim = FeedSimulatorMain.start(topology, 0, new SystemEpochNanoClock()))
+            try (FeedSimulatorMain sim = FeedSimulatorMain.start(topology, 0, symbols, new SystemEpochNanoClock()))
             {
                 final Map<Long, FakeCommandClient.Ref> latest = awaitEverySymbol(venue, symbols, 10_000);
                 for (final SymbolDirectory.Symbol s : symbols.all())

@@ -921,7 +921,7 @@ public final class MatcherShard implements ShardStateMachine
         final long requestId = d.requestId();
         final short scopeRaw = d.scopeRaw();
         final short reasonRaw = d.reasonRaw();
-        if (scopeRaw < 1 || scopeRaw > 5 || (reasonRaw != 2 && reasonRaw != 3 && reasonRaw != 8))
+        if (scopeRaw < 1 || scopeRaw > 6 || (reasonRaw != 2 && reasonRaw != 3 && reasonRaw != 8))
         {
             ew.commandRejected(requestId, MassCancelDecoder.TEMPLATE_ID, RejectReason.MALFORMED);
             return;
@@ -944,6 +944,8 @@ public final class MatcherShard implements ShardStateMachine
                 list = firm == null ? null : firm.orders;
                 break;
             case SESSION:
+            case SESSION_GATEWAY:
+                filterGateway = scope == MassCancelScope.SESSION_GATEWAY;
                 if (firm != null)
                 {
                     final int si = sessionIdx.get(firmId & 0xFFFF_FFFFL, sessionId);

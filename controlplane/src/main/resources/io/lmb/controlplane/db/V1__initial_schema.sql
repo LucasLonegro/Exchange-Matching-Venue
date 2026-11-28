@@ -1,12 +1,6 @@
 -- LMB control plane schema. Portable subset of PostgreSQL and H2. Idempotent (IF NOT EXISTS).
 -- Times are epoch milliseconds (BIGINT) unless the column ends in _ns. Money is integer cents.
 
--- Set once, by whichever instance bootstrapped the database from the CSV files.
-CREATE TABLE IF NOT EXISTS bootstrap_marker (
-  id INTEGER PRIMARY KEY,
-  source VARCHAR(1000) NOT NULL,
-  created_ms BIGINT NOT NULL);
-
 -- Reference data: symbols. status ACTIVE | REMOVED. operator_state NULL | HALTED | AUCTION_CALL
 -- (an operator override that wins over the trading calendar).
 CREATE TABLE IF NOT EXISTS symbol (
@@ -26,17 +20,12 @@ CREATE TABLE IF NOT EXISTS symbol (
   dynamic_band_bps INTEGER DEFAULT 0 NOT NULL,
   volatility_auction_ns BIGINT DEFAULT 300000000000 NOT NULL);
 
--- Participants.
+-- Participants, as far as risk goes. Their sessions and credentials belong to the access service.
 CREATE TABLE IF NOT EXISTS firm (
   firm_id INTEGER PRIMARY KEY,
   name VARCHAR(200) NOT NULL,
-  api_key VARCHAR(200) NOT NULL,
   enabled BOOLEAN NOT NULL,
   updated_ms BIGINT NOT NULL);
-
-CREATE TABLE IF NOT EXISTS firm_session (
-  session_id BIGINT PRIMARY KEY,
-  firm_id INTEGER NOT NULL REFERENCES firm (firm_id));
 
 -- Firm-wide limits; the allocator splits credit_limit into per-shard budgets.
 CREATE TABLE IF NOT EXISTS firm_limit (

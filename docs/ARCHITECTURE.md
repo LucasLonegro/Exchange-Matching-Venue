@@ -43,7 +43,7 @@ Stack: Java 21, Aeron Cluster + Archive 1.54, Agrona, SBE, Artio (FIX), grpc-jav
 |---|---|---|
 | `schemas` | `io.lmb.sbe` | SBE schema `venue.xml`: commands (templateId 1-99) and events (100-199). Frozen. |
 | `api-proto` | `io.lmb.proto.*` | gRPC API: `order_entry.proto`, `market_data.proto`. Frozen. |
-| `common` | `io.lmb.api`, `io.lmb.common` | `ShardStateMachine`, `EventSink`, `TimerScheduler`, `CommandClient`, `EventStreamClient`, `VenueClients`, `PostTradeSink` and `SinkRunner` (durable event stream consumers), `Topology`, `Config`, `SymbolDirectory`, `FirmDirectory`, `HashChain`, `Events`. Frozen. |
+| `common` | `io.lmb.api`, `io.lmb.common` | `ShardStateMachine`, `EventSink`, `TimerScheduler`, `CommandClient`, `EventStreamClient`, `VenueClients`, `PostTradeSink` and `SinkRunner` (durable event stream consumers), `Topology`, `Config`, `SymbolDirectory` and `SymbolDirectorySource`, `PolledSnapshot`, `HashChain`, `Events`. Frozen. |
 | `testkit` | `io.lmb.testkit` | `InMemoryVenue`: a `VenueClients` that drives state machines in memory, no Aeron. Frozen. |
 | `matcher-core` | `io.lmb.matcher` | The state machine: books, matching, risk, dedupe, symbol states, auctions, snapshot. No Aeron dependency. |
 | `cluster-client` | `io.lmb.cluster.client` | Aeron implementation of `VenueClients` (command ingress, event stream subscription). |
@@ -53,6 +53,7 @@ Stack: Java 21, Aeron Cluster + Archive 1.54, Agrona, SBE, Artio (FIX), grpc-jav
 | `marketdata` | `io.lmb.marketdata` | Market data publisher (UDP A/B, snapshots, TCP retransmit, gRPC) and a client library. |
 | `feeds` | `io.lmb.feeds` | Feed handler SPI, simulated external venues, NBBO consolidator. |
 | `controlplane` | `io.lmb.controlplane` | Reference data and limits (PostgreSQL), admin REST, scheduler, risk-budget allocator. |
+| `access` | `io.lmb.access` | Teams, member sessions, hashed API keys (issue, rotate, revoke), scopes, throttle tiers; a polled directory snapshot for gateways and drop copy. Never on the order path. |
 | `posttrade` | `io.lmb.posttrade` | FIX drop copy, Kafka bridge, WORM archiver (S3 Object Lock), ClickHouse loader. |
 | `ledger` | `io.lmb.ledger` | Cash, positions, average cost, realised and unrealised PnL per firm; nightly marks at the official close; daily statements (PostgreSQL and files). |
 | `replayer` | `io.lmb.replayer` | Shadow replayer (re-executes the log, compares hashes) and backtester. |
@@ -184,7 +185,9 @@ Risk (per firm, per shard; limits arrive as `RiskLimitUpdate`)
 Other commands
 - `MassCancel`: cancels matching orders in time-priority-independent but deterministic order, one
   `ExecutionReport(CANCELED)` each (reason from the command), then `MassCancelDone`. O(k) in the
-  number of orders canceled for FIRM/SESSION/FIRM_SYMBOL scopes (per-firm order list).
+  number of orders canceled for FIRM/SESSION/FIRM_SYMBOL scopes (per-firm order list). SESSION_GATEWAY
+  (cancel-on-disconnect) walks the session's list and cancels only orders whose last entering gateway is
+  `targetGatewayId`.
 - `ReferencePrice`: ignored unless `sourceTsNs` is newer than the last applied for the symbol
   (two consolidators submit the same updates). Applied: `ReferencePriceApplied` with the new band.
   A roll's close and a volatility re-centre count as applied at max(last applied, cluster time), so a
@@ -259,7 +262,10 @@ All services are plain `main` classes on the shared classpath. Common convention
 - Logging through slf4j. Do **not** ship a `logback.xml` in a module's main resources (`common` ships the only one).
 - Metrics: Prometheus HTTP endpoint on the port `Topology` assigns; names start `lmb_<module>_`.
   Latency as HdrHistogram-derived quantile gauges (p50, p99, p999, max).
-- Reference data comes from `SymbolDirectory` / `FirmDirectory` (CSV files named in the topology).
+- Reference data has no files. Symbols and firms' risk accounts live in the control plane's database (operator API);
+  services read symbols from its `GET /internal/v1/symbols` (`SymbolDirectorySource`: polled, cached on disk). Teams,
+  sessions and keys live in the access service (`AccessDirectorySource`). Local runs are seeded through the APIs
+  (`scripts/local-seed`).
 
 | Service | Main class | Instances (local / prod) |
 |---|---|---|
@@ -270,6 +276,7 @@ All services are plain `main` classes on the shared classpath. Common convention
 | Feed simulator (optional, legacy) | `io.lmb.feeds.FeedSimulatorMain` | 0 (`--with-feedsim`: 1) / 0 |
 | NBBO consolidator (optional, legacy) | `io.lmb.feeds.ConsolidatorMain` | 0 (`--consolidators N`) / 0 |
 | Control plane | `io.lmb.controlplane.ControlPlaneMain` | 2 / 2 |
+| Access | `io.lmb.access.AccessMain` | 1 / 2 (stateless over one database) |
 | Post-trade | `io.lmb.posttrade.PostTradeMain` | 1 / 2 |
 | Ledger | `io.lmb.ledger.LedgerMain` | 1 / 1 (exactly one: the only writer of its tables) |
 | Shadow replayer | `io.lmb.replayer.ShadowReplayerMain` | 1 per shard / 1 per shard |
@@ -278,17 +285,25 @@ All services are plain `main` classes on the shared classpath. Common convention
 
 ### 5.1 Gateway
 - gRPC `OrderEntry.Session` (see `order_entry.proto`) and FIX 4.4 over Artio. `OrderQuery` unary calls for REST via Envoy.
-- Session layer: Logon with firm, session id and API key checked against `FirmDirectory`; client and
-  server sequence numbers; heartbeats; resume from `ShardCursor`s (replay from the event stream with `poss_dup`).
-- Stateless checks before the log: symbol exists, required fields, max order size, per-session token
-  bucket (`THROTTLED`), bounded per-shard in-flight queue (`UNAVAILABLE` when full or shard down).
-  Cancels bypass the throttle and are prioritised over new orders.
-- Routing by `SymbolDirectory` (ticker -> symbolId, shard). MassCancel fans out one command per shard.
+- Session layer: Logon with firm, session id and API key checked against the access directory snapshot
+  (polled from the access service, cached on disk; the gateway does not start without one). The grant (key id, scopes, tier) lives in the session's state and is revalidated against
+  newer snapshots: revocation ends the connection. Client and server sequence numbers; heartbeats; resume
+  from `ShardCursor`s (replay from the event stream with `poss_dup`).
+- Stateless checks before the log: scope (`NOT_PERMITTED`), symbol exists, required fields, max order
+  size, two per-session token buckets from the session's tier (messages: every request; orders: new
+  orders and replaces; `THROTTLED`), bounded per-shard in-flight queue (`UNAVAILABLE` when full or shard
+  down). Cancels skip the order bucket and are prioritised over new orders. Throttling and credentials never
+  reach the matcher.
+- Routing by symbol (ticker -> symbolId, shard): seeded from the control plane's symbol directory, kept current by
+  newer snapshots and the shards' `SymbolDefined` events. MassCancel fans out one command per shard.
 - Reliability: every submitted command stays in an in-flight buffer until its effect appears in the
   event stream; on timeout or reconnect it is resubmitted with `possResend = TRUE`.
 - Execution reports come only from the event stream, filtered by `sessionId`, so a client that
   reconnects to another gateway still gets its reports.
-- Cancel-on-disconnect: `MassCancel(scope=SESSION, reason=DISCONNECT)` to every shard.
+- Cancel-on-disconnect: `MassCancel(scope=SESSION_GATEWAY, targetGatewayId=<own id>, reason=DISCONNECT)`
+  to every shard, optionally after a client-chosen window (capped) during which a reconnect keeps the orders.
+- Internet exposure: gRPC TLS (optionally mTLS) in process; FIX TLS by an Envoy TCP proxy on the same host
+  in front of Artio on loopback.
 
 ### 5.2 Market data publisher
 - Consumes each shard's event stream; maintains books per symbol; publishes at `CommandApplied` boundaries.
@@ -315,8 +330,8 @@ All services are plain `main` classes on the shared classpath. Common convention
 
 ### 5.4 Control plane
 - PostgreSQL in production, H2 (PostgreSQL mode) for the local profile and tests (`lmb.db.url`).
-- Bootstraps symbols and firms from the CSV files into an empty database (afterwards the database is
-  the source of truth); pushes `SymbolDefinition` (including `dynamicBandBps`, `volatilityAuctionNs`)
+- The database is the only source of reference data: symbols and firms are created through the admin REST API.
+  Serves the symbol directory to the other services (`GET /internal/v1/symbols`, service token); pushes `SymbolDefinition` (including `dynamicBandBps`, `volatilityAuctionNs`)
   and `RiskLimitUpdate` to the shards and reconciles from the event stream.
 - Admin REST (Javalin): symbols (POST/PUT/DELETE), halt/resume/auction per symbol or market-wide,
   kill switch, limits, day roll, calendar overrides, status. Writes are audited.
@@ -326,6 +341,9 @@ All services are plain `main` classes on the shared classpath. Common convention
   an AUCTION_CALL target (closing auction, operator auction) is sent as a takeover; admin
   AUCTION_STOP / RESUME_SYMBOL are rejected during one unless `force=true`; RESUME_MARKET goes out
   per symbol and skips symbols in a volatility auction.
+- Firms here are risk accounts only (`POST /api/firms` with credit and position limits). Admin REST
+  authenticates per-operator tokens (hashes in a file; the operator is the audit actor) and is reachable
+  only from operators' networks.
 - Reference prices: the listing price is only the initial reference. Once the venue applies its own
   (`ReferencePriceApplied`), the control plane records it and the band and stops comparing or pushing
   the listing price. It stores each `ClosingPrice` (price, previous close, source, trading date).
@@ -346,6 +364,10 @@ All services are plain `main` classes on the shared classpath. Common convention
   marks positions to the official close (the day's last ClosingPrice). Once every shard has ended a
   trading day it writes each firm's daily statement. The exchange publishes prices; valuation lives here.
   Details: docs/modules/ledger.md.
+- Access service: owns teams, member sessions, API keys (SHA-256 only; issue, rotate with a grace period,
+  revoke), scopes (TRADE, CANCEL, QUERY, DROP_COPY) and throttle tiers. Operators' REST on loopback; a
+  versioned directory snapshot (ETag) on an internal port for gateways and post-trade. Details:
+  docs/modules/access.md.
 - Shadow replayer: reads the shard's Raft log from a member's Archive, runs the same
   `ShardStateMachine`, and compares each `CommandApplied.chainHash` with the live event stream.
   Divergence is a page-worthy metric. Backtester: same machine over a recorded log plus injected orders.

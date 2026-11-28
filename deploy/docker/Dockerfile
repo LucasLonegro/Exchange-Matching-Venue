@@ -21,7 +21,6 @@ RUN groupadd --system --gid 10001 lmb \
 
 COPY dist/target/lmb/lib/ /opt/lmb/lib/
 COPY deploy/bin/lmb-service deploy/bin/lmb-pin-threads /opt/lmb/bin/
-COPY deploy/local/symbols.csv deploy/local/firms.csv /etc/lmb/refdata-sample/
 
 ENV LMB_HOME=/opt/lmb \
     LMB_TOPOLOGY=/etc/lmb/topology.properties \

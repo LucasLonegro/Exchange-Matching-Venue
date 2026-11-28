@@ -6,10 +6,10 @@ import io.lmb.testkit.InMemoryVenue;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
+import java.util.List;
 
 import static io.lmb.controlplane.TestSupport.MS;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -22,14 +22,12 @@ class VolatilityAuctionTest
 {
     private static final ZoneId NY = ZoneId.of("America/New_York");
     private static final long VOL_NS = 120_000_000_000L;
-    /** Symbol 1 has a dynamic collar and a 2 minute volatility auction; the others use the CSV defaults. */
-    private static final String SYMBOLS = """
-        symbolId,ticker,shard,tickSize,lotSize,referencePrice,priceBandBps,maxOrderQty,dynamicBandBps,volatilityAuctionNs
-        1,AAPL,0,1,1,19000,1000,100000,500,120000000000
-        2,MSFT,0,1,1,42000,1000,100000,,
-        3,AMZN,0,1,1,18500,1000,100000,0,0
-        5,GOOG,1,1,1,17000,1000,100000,,
-        """;
+    /** Symbol 1 has a dynamic collar and a 2 minute volatility auction; the others use the defaults. */
+    private static final List<Store.SymbolRow> SYMBOLS = List.of(
+        TestSupport.symbol(1, "AAPL", 0, 19000, 500, 120_000_000_000L),
+        TestSupport.symbol(2, "MSFT", 0, 42000),
+        TestSupport.symbol(3, "AMZN", 0, 18500, 0, 0),
+        TestSupport.symbol(5, "GOOG", 1, 17000));
 
     private final ScriptedShard s0 = new ScriptedShard(0, null);
     private final ScriptedShard s1 = new ScriptedShard(1, null);
@@ -48,7 +46,7 @@ class VolatilityAuctionTest
         venue = new InMemoryVenue(startNs, s0, s1);
         url = TestSupport.h2Url("vol");
         data = TestSupport.dataDir();
-        Files.writeString(data.resolve("symbols.csv"), SYMBOLS);
+        TestSupport.seed(url, SYMBOLS, TestSupport.FIRMS);
         cp = open(scheduler);
         return cp;
     }

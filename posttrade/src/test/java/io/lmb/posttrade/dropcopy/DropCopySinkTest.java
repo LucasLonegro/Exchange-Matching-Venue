@@ -1,7 +1,10 @@
 package io.lmb.posttrade.dropcopy;
 
 import io.lmb.common.Events;
-import io.lmb.common.FirmDirectory;
+import io.lmb.common.access.AccessDirectory;
+import io.lmb.common.access.AccessDirectorySource;
+import io.lmb.common.access.Scope;
+import io.lmb.testkit.TestAccess;
 import io.lmb.posttrade.PostTradeMetrics;
 import io.lmb.api.SinkRunner;
 import io.lmb.posttrade.TestVenue;
@@ -58,11 +61,31 @@ class DropCopySinkTest
 
     private void startEngine()
     {
-        final FirmDirectory firms = new FirmDirectory(List.of(
-            new FirmDirectory.Firm(100, "alpha", "k100", List.of(1000L), 1_000_000, 1_000_000),
-            new FirmDirectory.Firm(200, "beta", "k200", List.of(2000L), 1_000_000, 1_000_000)));
-        engine = new DropCopyEngine(dataDir, "127.0.0.1", port, "LMB", "admin", 256 * 1024, true, firms, metrics).start();
+        final AccessDirectory firms = TestAccess.directory(
+            TestAccess.firm(100, "alpha", "k100", 1000), TestAccess.firm(200, "beta", "k200", 2000));
+        engine = new DropCopyEngine(dataDir, "127.0.0.1", port, "LMB", "admin", 256 * 1024, true,
+            AccessDirectorySource.fixed(firms), metrics).start();
         closeables.add(engine);
+    }
+
+    @Test
+    void firmLogonsNeedAKeyWithTheDropCopyScope()
+    {
+        final AccessDirectory d = new AccessDirectory(1, System.currentTimeMillis(), List.of(),
+            List.of(new AccessDirectory.FirmEntry(100, "alpha", "standard", true), new AccessDirectory.FirmEntry(200, "beta", "standard", false)),
+            List.of(),
+            List.of(new AccessDirectory.KeyEntry("t", AccessDirectory.sha256Hex("trade-key"), 100, 1000, EnumSet.of(Scope.TRADE, Scope.QUERY), 0),
+                new AccessDirectory.KeyEntry("d", AccessDirectory.sha256Hex("dc-key"), 100, 0, EnumSet.of(Scope.DROP_COPY), 0),
+                new AccessDirectory.KeyEntry("x", AccessDirectory.sha256Hex("disabled-firm-key"), 200, 0, EnumSet.of(Scope.DROP_COPY), 0)));
+        engine = new DropCopyEngine(dataDir, "127.0.0.1", port, "LMB", "admin", 256 * 1024, true, AccessDirectorySource.fixed(d), metrics)
+            .start();
+        closeables.add(engine);
+        startRunner();
+        final FixTestClient c = client("scope");
+        assertNull(c.logon(port, "T100", "100", "trade-key"), "an order entry key is not a drop copy key");
+        assertNull(c.logon(port, "X200", "200", "disabled-firm-key"), "disabled firm");
+        assertNotNull(c.logon(port, "D100", "100", "dc-key"));
+        assertEquals(2, metrics.dropCopyLogonsRejected.get());
     }
 
     private SinkRunner startRunner()

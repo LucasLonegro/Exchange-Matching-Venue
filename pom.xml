@@ -25,6 +25,7 @@
     <module>controlplane</module>
     <module>posttrade</module>
     <module>ledger</module>
+    <module>access</module>
     <module>replayer</module>
     <module>tools</module>
     <module>dist</module>
@@ -75,6 +76,7 @@
       <dependency><groupId>io.lmb</groupId><artifactId>lmb-controlplane</artifactId><version>${project.version}</version></dependency>
       <dependency><groupId>io.lmb</groupId><artifactId>lmb-posttrade</artifactId><version>${project.version}</version></dependency>
       <dependency><groupId>io.lmb</groupId><artifactId>lmb-ledger</artifactId><version>${project.version}</version></dependency>
+      <dependency><groupId>io.lmb</groupId><artifactId>lmb-access</artifactId><version>${project.version}</version></dependency>
       <dependency><groupId>io.lmb</groupId><artifactId>lmb-replayer</artifactId><version>${project.version}</version></dependency>
       <dependency><groupId>io.lmb</groupId><artifactId>lmb-tools</artifactId><version>${project.version}</version></dependency>
 

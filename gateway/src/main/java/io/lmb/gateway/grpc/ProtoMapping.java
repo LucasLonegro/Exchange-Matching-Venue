@@ -94,6 +94,7 @@ public final class ProtoMapping
             case SYMBOL_NOT_TRADING -> SessionReject.Reason.SYMBOL_NOT_TRADING;
             case MAX_ORDER_SIZE -> SessionReject.Reason.MAX_ORDER_SIZE;
             case DUPLICATE_SESSION -> SessionReject.Reason.DUPLICATE_SESSION;
+            case NOT_PERMITTED -> SessionReject.Reason.NOT_PERMITTED;
         };
     }
 

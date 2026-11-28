@@ -3,8 +3,9 @@ package io.lmb.posttrade;
 import io.lmb.api.PostTradeSink;
 import io.lmb.api.SinkRunner;
 import io.lmb.api.VenueClients;
-import io.lmb.common.FirmDirectory;
+import io.lmb.common.access.AccessDirectorySource;
 import io.lmb.common.SymbolDirectory;
+import io.lmb.common.SymbolDirectorySource;
 import io.lmb.posttrade.dropcopy.DropCopyEngine;
 import io.lmb.posttrade.dropcopy.DropCopySink;
 import io.lmb.posttrade.store.TradeStore;
@@ -36,7 +37,7 @@ public final class PostTrade implements AutoCloseable
 
     private final PostTradeConfig config;
     private final VenueClients venue;
-    private final FirmDirectory firms;
+    private final AccessDirectorySource firms;
     private final IntFunction<String> tickers;
     private final PostTradeMetrics metrics = new PostTradeMetrics();
     private final List<SinkRunner> runners = new ArrayList<>();
@@ -45,15 +46,20 @@ public final class PostTrade implements AutoCloseable
     private HTTPServer metricsServer;
     private boolean closed;
 
-    public PostTrade(final PostTradeConfig config, final VenueClients venue, final FirmDirectory firms,
-        final SymbolDirectory symbols)
+    /**
+     * @param symbols the control plane's symbol snapshot, for the drop copy's tickers (null: symbol ids as tickers,
+     *                tests). Read at each report, so symbols added later get their ticker once the snapshot has them.
+     */
+    public PostTrade(final PostTradeConfig config, final VenueClients venue, final AccessDirectorySource access,
+        final SymbolDirectorySource symbols)
     {
         this.config = config;
         this.venue = venue;
-        this.firms = firms;
+        this.firms = access;
         this.tickers = id ->
         {
-            final SymbolDirectory.Symbol s = symbols == null ? null : symbols.byId(id);
+            final SymbolDirectory d = symbols == null ? null : symbols.current();
+            final SymbolDirectory.Symbol s = d == null ? null : d.byId(id);
             return s == null ? Integer.toString(id) : s.ticker();
         };
     }

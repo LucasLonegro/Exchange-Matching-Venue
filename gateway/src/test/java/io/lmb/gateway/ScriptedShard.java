@@ -42,7 +42,8 @@ import java.util.Set;
  */
 final class ScriptedShard implements ShardStateMachine
 {
-    record Command(int templateId, long firmId, long clOrdId, boolean possResend, MassCancelScope scope, CancelReason reason)
+    record Command(int templateId, long firmId, long clOrdId, boolean possResend, MassCancelScope scope, CancelReason reason,
+        int targetGatewayId)
     {
     }
 
@@ -161,7 +162,7 @@ final class ScriptedShard implements ShardStateMachine
     {
         newOrder.wrapAndApplyHeader(buffer, offset, hdr);
         final boolean possResend = newOrder.possResend() == BooleanType.TRUE;
-        commands.add(new Command(NewOrderDecoder.TEMPLATE_ID, newOrder.firmId(), newOrder.clOrdId(), possResend, null, null));
+        commands.add(new Command(NewOrderDecoder.TEMPLATE_ID, newOrder.firmId(), newOrder.clOrdId(), possResend, null, null, 0));
         final Order o = new Order();
         o.firmId = newOrder.firmId();
         o.sessionId = newOrder.sessionId();
@@ -246,7 +247,7 @@ final class ScriptedShard implements ShardStateMachine
     {
         cancel.wrapAndApplyHeader(buffer, offset, hdr);
         final boolean possResend = cancel.possResend() == BooleanType.TRUE;
-        commands.add(new Command(CancelOrderDecoder.TEMPLATE_ID, cancel.firmId(), cancel.clOrdId(), possResend, null, null));
+        commands.add(new Command(CancelOrderDecoder.TEMPLATE_ID, cancel.firmId(), cancel.clOrdId(), possResend, null, null, 0));
         final Order template = new Order();
         template.firmId = cancel.firmId();
         template.sessionId = cancel.sessionId();
@@ -278,7 +279,7 @@ final class ScriptedShard implements ShardStateMachine
     {
         replace.wrapAndApplyHeader(buffer, offset, hdr);
         final boolean possResend = replace.possResend() == BooleanType.TRUE;
-        commands.add(new Command(ReplaceOrderDecoder.TEMPLATE_ID, replace.firmId(), replace.clOrdId(), possResend, null, null));
+        commands.add(new Command(ReplaceOrderDecoder.TEMPLATE_ID, replace.firmId(), replace.clOrdId(), possResend, null, null, 0));
         final Order template = new Order();
         template.firmId = replace.firmId();
         template.sessionId = replace.sessionId();
@@ -317,12 +318,14 @@ final class ScriptedShard implements ShardStateMachine
         mass.wrapAndApplyHeader(buffer, offset, hdr);
         final MassCancelScope scope = mass.scope();
         final CancelReason reason = mass.reason();
-        commands.add(new Command(MassCancelDecoder.TEMPLATE_ID, mass.firmId(), mass.requestId(), false, scope, reason));
+        commands.add(new Command(MassCancelDecoder.TEMPLATE_ID, mass.firmId(), mass.requestId(), false, scope, reason,
+            mass.targetGatewayId()));
         final long requestId = mass.requestId();
         final long sessionId = mass.sessionId();
         final long firmId = mass.firmId();
         final long symbolId = mass.symbolId();
         final int gatewayId = mass.gatewayId();
+        final int targetGateway = mass.targetGatewayId();
         int canceled = 0;
         for (final Order o : book)
         {
@@ -334,6 +337,7 @@ final class ScriptedShard implements ShardStateMachine
             {
                 case FIRM -> o.firmId == firmId;
                 case SESSION -> o.sessionId == sessionId;
+                case SESSION_GATEWAY -> o.sessionId == sessionId && o.gatewayId == targetGateway;
                 case FIRM_SYMBOL -> o.firmId == firmId && o.symbolId == symbolId;
                 case SYMBOL -> o.symbolId == symbolId;
                 default -> false;

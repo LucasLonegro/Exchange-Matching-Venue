@@ -55,7 +55,7 @@ All keys come from the topology file (or `-D`).
 
 | Key | Default | Meaning |
 |---|---|---|
-| `lmb.symbols` | `deploy/local/symbols.csv` | symbol directory (shard, tick, reference price) |
+| `lmb.symbols.url`, `.token` | every control plane instance; `lmb-local-symbols` | the control plane's symbol directory (`GET /internal/v1/symbols`), read once at start (cached on disk); a symbol listed later gets an NBBO after a restart |
 | `lmb.consolidators` | 2 | consolidator instances (also the simulator's default targets) |
 | `lmb.feeds.venues` | 4 (1..10) | simulated venues |
 | `lmb.feeds.handler` | `udp-sim` | `VenueFeedHandler` provider name |

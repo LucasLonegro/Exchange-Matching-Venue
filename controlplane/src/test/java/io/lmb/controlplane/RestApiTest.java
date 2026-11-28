@@ -1,5 +1,7 @@
 package io.lmb.controlplane;
 
+import io.lmb.common.Json;
+import io.lmb.common.SymbolDirectorySource;
 import io.lmb.sbe.SymbolState;
 import io.lmb.testkit.InMemoryVenue;
 import org.junit.jupiter.api.AfterEach;
@@ -17,6 +19,7 @@ import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Full control plane with its own threads, REST on loopback, real time. */
@@ -72,7 +75,7 @@ class RestApiTest
         final List<?> symbols = (List<?>)Json.parse(get("/api/symbols"));
         assertEquals(6, symbols.size());
         assertTrue(await(() -> get("/api/symbols/1").contains("\"shardState\":\"CONTINUOUS\"")));
-        assertTrue(get("/api/firms").contains("\"apiKey\":\"al***\""), "api keys are masked");
+        assertFalse(get("/api/firms").contains("apiKey"), "credentials belong to the access service");
         assertTrue(get("/api/limits").contains("\"creditLimit\":100000000"));
         assertEquals(404, call("GET", "/api/symbols/99", null, TOKEN).statusCode());
 
@@ -127,6 +130,18 @@ class RestApiTest
         assertEquals(0, s0.count("MASS SYMBOL"));
         assertEquals(400, call("POST", "/api/masscancel", "{\"scope\":\"GATEWAY\"}", TOKEN).statusCode());
         assertEquals(400, call("POST", "/api/masscancel", "{\"scope\":\"FIRM\"}", TOKEN).statusCode());
+        assertEquals(400, call("POST", "/api/masscancel", "{\"scope\":\"SESSION\",\"sessionId\":1001}", TOKEN).statusCode(),
+            "a session is named with its firm");
+        write("POST", "/api/masscancel", "{\"scope\":\"SESSION\",\"firmId\":100,\"sessionId\":1001}", 200);
+        assertTrue(s0.count("MASS SESSION firm=100") >= 1 && s1.count("MASS SESSION firm=100") >= 1);
+
+        // a new team's risk limits (its sessions and keys are the access service's)
+        assertEquals(400, call("POST", "/api/firms", "{\"firmId\":400,\"name\":\"Delta\"}", TOKEN).statusCode());
+        write("POST", "/api/firms", "{\"firmId\":400,\"name\":\"Delta\",\"creditLimit\":5000000,\"maxPositionPerSymbol\":77}", 200);
+        assertTrue(await(() -> s0.limits(400) != null && s1.limits(400) != null && s0.limits(400).maxPos == 77));
+        assertTrue(get("/api/firms/400").contains("\"name\":\"Delta\""));
+        assertEquals(422, call("POST", "/api/firms", "{\"firmId\":400,\"name\":\"Delta\",\"creditLimit\":1,\"maxPositionPerSymbol\":1}",
+            TOKEN).statusCode(), "already exists");
         assertEquals(400, call("POST", "/api/masscancel", "not json", TOKEN).statusCode());
 
         // day roll
@@ -135,16 +150,36 @@ class RestApiTest
         assertEquals(20261117, s1.tradingDate());
         assertEquals(400, call("POST", "/api/dayroll", "{\"tradingDate\":20261341}", TOKEN).statusCode());
 
+        // the services' symbol snapshot: service token only, content ETag, 304; first URL down, the second answers
+        assertEquals(401, internal(null, null).statusCode());
+        assertEquals(401, internal(TOKEN, null).statusCode(), "an operator token is not the service token");
+        final HttpResponse<String> snap = internal(SymbolDirectorySource.LOCAL_TOKEN, null);
+        assertEquals(200, snap.statusCode());
+        final String etag = snap.headers().firstValue("ETag").orElseThrow();
+        assertEquals(304, internal(SymbolDirectorySource.LOCAL_TOKEN, etag).statusCode());
+        final SymbolDirectorySource source = SymbolDirectorySource.polling(
+            List.of("http://127.0.0.1:1", "http://127.0.0.1:" + REST_PORT), SymbolDirectorySource.LOCAL_TOKEN, 60_000, null, "test")
+            .start();
+        assertEquals(6, source.current().all().size());
+        assertEquals(1, source.current().byTicker("GOOG").shard());
+        assertEquals("\"" + source.current().version() + "\"", etag);
+
         // reference data changes
         assertEquals(400, call("POST", "/api/symbols", "{\"symbolId\":9,\"ticker\":\"ibm!\",\"shard\":0}", TOKEN).statusCode());
         write("POST", "/api/symbols", "{\"symbolId\":9,\"ticker\":\"IBM\",\"shard\":0,\"tickSize\":1,\"lotSize\":1," +
             "\"referencePrice\":15000,\"priceBandBps\":500,\"maxOrderQty\":1000}", 200);
         assertEquals(500, s0.symbol(9).band);
+        source.pollOnce();
+        assertEquals(500, source.current().byTicker("IBM").priceBandBps(), "a new symbol reaches the snapshot");
+        assertEquals(2, source.updates.get());
         assertEquals(422, call("POST", "/api/symbols", "{\"symbolId\":9,\"ticker\":\"IBM\",\"shard\":1,\"tickSize\":1,\"lotSize\":1," +
             "\"referencePrice\":15000,\"priceBandBps\":500,\"maxOrderQty\":1000}", TOKEN).statusCode(), "cannot move shards");
         dynamicCollar();
         write("DELETE", "/api/symbols/9", null, 200);
         assertEquals(SymbolState.REMOVED, s0.state(9));
+        source.pollOnce();
+        assertNull(source.current().byId(9), "a removed symbol leaves the snapshot");
+        source.close();
         assertEquals(422, call("POST", "/api/symbols/9/halt", null, TOKEN).statusCode(), "removed symbol");
 
         // calendar overrides
@@ -293,6 +328,21 @@ class RestApiTest
         if (token != null)
         {
             b.header("X-LMB-Admin-Token", token);
+        }
+        return http.send(b.build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    private HttpResponse<String> internal(final String token, final String ifNoneMatch) throws Exception
+    {
+        final HttpRequest.Builder b = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + REST_PORT + "/internal/v1/symbols"))
+            .timeout(Duration.ofSeconds(10)).GET();
+        if (token != null)
+        {
+            b.header("Authorization", "Bearer " + token);
+        }
+        if (ifNoneMatch != null)
+        {
+            b.header("If-None-Match", ifNoneMatch);
         }
         return http.send(b.build(), HttpResponse.BodyHandlers.ofString());
     }

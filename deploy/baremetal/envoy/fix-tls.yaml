@@ -1,0 +1,51 @@
+# TLS in front of a gateway's FIX port (Artio speaks plain TCP). One per gateway host, started by
+# lmb-fix-tls.service. Participants connect to <gateway host>:9200 with TLS 1.2+; Envoy terminates TLS and
+# forwards the bytes to Artio on 127.0.0.1:9201 (lmb.gateway.fix.bindHost=127.0.0.1,
+# lmb.gateway.fix.listenPort=9201 in the topology), so the FIX engine is not reachable without TLS.
+# The same certificate as gRPC (/etc/lmb/tls/gateway.crt, .key). Artio sees every connection as coming from
+# 127.0.0.1: the participant's address is in Envoy's access log (/var/log/lmb/fix-tls-access.log).
+# The k8s manifests render the same listener (deploy/k8s/render.py, ConfigMap lmb-fix-tls).
+admin:
+  address:
+    socket_address: {address: 127.0.0.1, port_value: 15201}
+
+static_resources:
+  listeners:
+    - name: fix_tls
+      address:
+        socket_address: {address: 0.0.0.0, port_value: 9200}
+      per_connection_buffer_limit_bytes: 65536
+      filter_chains:
+        - transport_socket:
+            name: envoy.transport_sockets.tls
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+              common_tls_context:
+                tls_params: {tls_minimum_protocol_version: TLSv1_2}
+                tls_certificates:
+                  - certificate_chain: {filename: /etc/lmb/tls/gateway.crt}
+                    private_key: {filename: /etc/lmb/tls/gateway.key}
+          filters:
+            - name: envoy.filters.network.tcp_proxy
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+                stat_prefix: fix_tls
+                cluster: artio
+                # longer than any FIX heartbeat interval: Artio's own heartbeat timeout ends dead sessions
+                idle_timeout: 600s
+                access_log:
+                  - name: envoy.access_loggers.file
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.access_loggers.file.v3.FileAccessLog
+                      path: /var/log/lmb/fix-tls-access.log
+  clusters:
+    - name: artio
+      type: STATIC
+      connect_timeout: 1s
+      load_assignment:
+        cluster_name: artio
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: {address: 127.0.0.1, port_value: 9201}

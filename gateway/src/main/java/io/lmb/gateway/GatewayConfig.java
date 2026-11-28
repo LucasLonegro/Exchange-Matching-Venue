@@ -27,9 +27,31 @@ public final class GatewayConfig
     public int maxInboundMessageBytes = 64 * 1024;
     public long slowConsumerTimeoutMs = 30_000;
 
-    // throttling (NewOrder and Replace only)
+    // throttling, per session, for sessions whose tier the access directory does not define
+    /** New orders and replaces. */
     public double throttleRatePerSec = 500;
     public int throttleBurst = 100;
+    /** Every request, cancels and mass cancels included. */
+    public double messageRatePerSec = 2_000;
+    public int messageBurst = 400;
+
+    // access (credentials): the access service, polled; without a URL, the firms CSV file of the topology
+    /** Base URL of the access service's directory (required by GatewayMain). */
+    public String accessUrl;
+    /** Bearer token of the access service's directory; the default is the local one (lmb.access.serviceToken). */
+    public String accessToken = "lmb-local-access";
+    public long accessPollMs = 2_000;
+    /** How often connected sessions are checked against the latest snapshot (revoked or expired keys). */
+    public long accessRevalidateMs = 1_000;
+
+    /** Upper bound of a cancel-on-disconnect time window (FIX 35003, gRPC cancel_on_disconnect_window_ms). */
+    public long codMaxWindowMs = 60_000;
+
+    // gRPC transport limits (Internet-facing)
+    public long grpcHandshakeTimeoutMs = 10_000;
+    public long grpcPermitKeepAliveMs = 10_000;
+    public int grpcMaxConcurrentCallsPerConnection = 8;
+    public int grpcMaxInboundMetadataBytes = 8 * 1024;
 
     // per-shard in-flight buffer
     public int inflightMax = 4_096;
@@ -51,8 +73,12 @@ public final class GatewayConfig
     public String tlsPrivateKey;
     public String tlsClientCa;
 
-    // FIX
+    // FIX (no TLS in Artio: on the Internet the FIX port sits behind a TLS-terminating proxy, see docs)
     public boolean fixEnabled = true;
+    /** null: {@link #bindHost}. 127.0.0.1 when a local TLS proxy is the only way in. */
+    public String fixBindHost;
+    /** The port Artio listens on; 0: {@link #fixPort}. Behind a TLS proxy on the same host, the proxy owns fixPort. */
+    public int fixListenPort;
     public String fixCompId = "LMB";
     public int fixTermBufferLength = 256 * 1024;
     public boolean fixDeleteLogsOnStart = false;
@@ -80,6 +106,20 @@ public final class GatewayConfig
 
         c.throttleRatePerSec = Double.parseDouble(t.get("lmb.gateway.throttle.ratePerSec", String.valueOf(c.throttleRatePerSec)));
         c.throttleBurst = t.getInt("lmb.gateway.throttle.burst", c.throttleBurst);
+        c.messageRatePerSec = Double.parseDouble(t.get("lmb.gateway.throttle.messageRatePerSec", String.valueOf(c.messageRatePerSec)));
+        c.messageBurst = t.getInt("lmb.gateway.throttle.messageBurst", c.messageBurst);
+
+        c.accessUrl = t.get("lmb.gateway.access.url", null);
+        c.accessToken = t.get("lmb.gateway.access.token", c.accessToken);
+        c.accessPollMs = t.getLong("lmb.gateway.access.pollMs", c.accessPollMs);
+        c.accessRevalidateMs = t.getLong("lmb.gateway.access.revalidateMs", c.accessRevalidateMs);
+        c.codMaxWindowMs = t.getLong("lmb.gateway.cod.maxWindowMs", c.codMaxWindowMs);
+
+        c.grpcHandshakeTimeoutMs = t.getLong("lmb.gateway.grpc.handshakeTimeoutMs", c.grpcHandshakeTimeoutMs);
+        c.grpcPermitKeepAliveMs = t.getLong("lmb.gateway.grpc.permitKeepAliveMs", c.grpcPermitKeepAliveMs);
+        c.grpcMaxConcurrentCallsPerConnection = t.getInt("lmb.gateway.grpc.maxConcurrentCallsPerConnection",
+            c.grpcMaxConcurrentCallsPerConnection);
+        c.grpcMaxInboundMetadataBytes = t.getInt("lmb.gateway.grpc.maxInboundMetadataBytes", c.grpcMaxInboundMetadataBytes);
 
         c.inflightMax = t.getInt("lmb.gateway.inflight.max", c.inflightMax);
         c.cancelHeadroom = t.getInt("lmb.gateway.inflight.cancelHeadroom", c.cancelHeadroom);
@@ -99,6 +139,8 @@ public final class GatewayConfig
 
         c.fixEnabled = t.getBool("lmb.gateway.fix.enabled", c.fixEnabled);
         c.fixCompId = t.get("lmb.gateway.fix.compId", c.fixCompId);
+        c.fixBindHost = t.get("lmb.gateway.fix.bindHost", null);
+        c.fixListenPort = t.getInt("lmb.gateway.fix.listenPort", 0);
         c.fixTermBufferLength = t.getInt("lmb.gateway.fix.termBufferLength", c.fixTermBufferLength);
         c.fixDeleteLogsOnStart = t.getBool("lmb.gateway.fix.deleteLogsOnStart", c.fixDeleteLogsOnStart);
 

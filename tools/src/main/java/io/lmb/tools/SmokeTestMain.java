@@ -15,11 +15,12 @@ import java.util.function.Predicate;
 /**
  * End-to-end check through a real gateway: a seller rests a DAY limit order, a buyer crosses it, and the
  * tool waits for the seller's NEW ack, the buyer's FILL and the seller's FILL. Repeats for every symbol in
- * {@code --symbols} (default: one symbol per shard) and {@code --pairs} times, {@code --interval-ms} apart.
+ * {@code --symbols} (default: one symbol per shard, from the gateway's ListSymbols) and {@code --pairs} times,
+ * {@code --interval-ms} apart, at the listing reference price (or {@code --price}).
  * <pre>
  * scripts/lmb-run io.lmb.tools.SmokeTestMain --topology F [--protocol grpc|fix] [--gateway 0]
  *     [--symbols AAPL,GOOG] [--pairs 1] [--interval-ms 0] [--qty 100] [--timeout-ms 5000]
- *     [--seller 1001] [--buyer 2001] [--max-failures 0] [--verbose] [--price CENTS --shard N (symbols not in the CSV)]
+ *     [--seller 1001] [--buyer 2001] [--max-failures 0] [--verbose] [--price CENTS] [--credentials FILE]
  * </pre>
  * Prints {@code SMOKE PASS ...} / {@code SMOKE FAIL ...} per pair and {@code SMOKE RESULT ok=N failed=M};
  * exit code 0 when failed &lt;= --max-failures.
@@ -79,15 +80,16 @@ public final class SmokeTestMain
         {
             for (final String t : ctx.get("symbols", "").split(","))
             {
-                SymbolDirectory.Symbol s = ctx.symbols.byTicker(t.trim());
-                if (s == null && ctx.has("price"))
+                SymbolDirectory.Symbol s = ctx.symbols().byTicker(t.trim());
+                if (s != null && ctx.has("price"))
                 {
-                    // A symbol added through the control plane, not in the CSV: price (cents) and shard given.
-                    s = new SymbolDirectory.Symbol(0, t.trim(), ctx.getInt("shard", 0), 1, 1, ctx.getLong("price", 0), 0, 0);
+                    // trade away from the listing price (the venue's reference may have moved)
+                    s = new SymbolDirectory.Symbol(s.symbolId(), s.ticker(), s.shard(), s.tickSize(), s.lotSize(),
+                        ctx.getLong("price", 0), 0, 0);
                 }
                 if (s == null)
                 {
-                    throw new IllegalArgumentException("unknown symbol " + t + " (not in the symbols file; give --price and --shard)");
+                    throw new IllegalArgumentException("unknown symbol " + t + " (not listed by the gateway)");
                 }
                 syms.add(s);
             }
@@ -96,7 +98,7 @@ public final class SmokeTestMain
         {
             for (int shard = 0; shard < ctx.topology.shardCount(); shard++)
             {
-                for (final SymbolDirectory.Symbol s : ctx.symbols.all())
+                for (final SymbolDirectory.Symbol s : ctx.symbols().all())
                 {
                     if (s.shard() == shard)
                     {

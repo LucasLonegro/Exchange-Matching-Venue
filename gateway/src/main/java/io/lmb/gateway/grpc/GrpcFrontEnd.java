@@ -16,7 +16,8 @@ import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder;
 import io.grpc.protobuf.services.ProtoReflectionServiceV1;
 import io.grpc.stub.ServerCallStreamObserver;
 import io.grpc.stub.StreamObserver;
-import io.lmb.common.FirmDirectory;
+import io.lmb.common.access.AccessDirectory;
+import io.lmb.common.access.Scope;
 import io.lmb.gateway.GatewayConfig;
 import io.lmb.gateway.core.GatewayCore;
 import io.lmb.proto.orderentry.ClientMessage;
@@ -79,7 +80,10 @@ public final class GrpcFrontEnd implements AutoCloseable
         server = NettyServerBuilder.forAddress(new InetSocketAddress(cfg.bindHost, cfg.grpcPort), creds)
             .directExecutor()
             .maxInboundMessageSize(cfg.maxInboundMessageBytes)
-            .permitKeepAliveTime(10, TimeUnit.SECONDS)
+            .maxInboundMetadataSize(cfg.grpcMaxInboundMetadataBytes)
+            .maxConcurrentCallsPerConnection(cfg.grpcMaxConcurrentCallsPerConnection)
+            .handshakeTimeout(cfg.grpcHandshakeTimeoutMs, TimeUnit.MILLISECONDS)
+            .permitKeepAliveTime(cfg.grpcPermitKeepAliveMs, TimeUnit.MILLISECONDS)
             .permitKeepAliveWithoutCalls(true)
             .addService(new OrderEntryService(core))
             .addService(ServerInterceptors.intercept(new OrderQueryService(core, cfg.queryRequireApiKey), apiKeyInterceptor))
@@ -167,16 +171,38 @@ public final class GrpcFrontEnd implements AutoCloseable
             this.requireApiKey = requireApiKey;
         }
 
-        private boolean authorised(final FirmDirectory.Firm firm, final StreamObserver<?> obs)
+        /**
+         * The x-lmb-api-key header must be a valid key with the QUERY scope of {@code firmId} (and, for a session's
+         * status, a firm-wide key or the session's own). {@code firmId} -1: unknown session.
+         */
+        private boolean authorised(final int firmId, final long sessionId, final StreamObserver<?> obs)
         {
-            if (firm == null)
+            final AccessDirectory directory = core.access().current();
+            if (directory == null)
             {
-                obs.onError(Status.NOT_FOUND.withDescription("unknown firm or session").asRuntimeException());
+                obs.onError(Status.UNAVAILABLE.withDescription("gateway not ready").asRuntimeException());
                 return false;
             }
-            if (requireApiKey && !GatewayCore.constantTimeEquals(firm.apiKey(), API_KEY.get()))
+            if (requireApiKey)
             {
-                obs.onError(Status.UNAUTHENTICATED.withDescription("missing or wrong x-lmb-api-key").asRuntimeException());
+                final AccessDirectory.KeyEntry k = directory.authenticateFirm(API_KEY.get(), Scope.QUERY, System.currentTimeMillis());
+                if (k == null)
+                {
+                    core.metrics().authFailureFromFrontEnd();
+                    obs.onError(Status.UNAUTHENTICATED.withDescription("missing, wrong, expired or revoked x-lmb-api-key, " +
+                        "or a key without the QUERY scope").asRuntimeException());
+                    return false;
+                }
+                if (k.firmId() != firmId || (sessionId != 0 && k.sessionId() != 0 && k.sessionId() != sessionId))
+                {
+                    core.metrics().authFailureFromFrontEnd();
+                    obs.onError(Status.PERMISSION_DENIED.withDescription("this key is not for that firm or session").asRuntimeException());
+                    return false;
+                }
+            }
+            else if (firmId < 0 || !directory.firms().containsKey(firmId))
+            {
+                obs.onError(Status.NOT_FOUND.withDescription("unknown firm or session").asRuntimeException());
                 return false;
             }
             return true;
@@ -185,7 +211,7 @@ public final class GrpcFrontEnd implements AutoCloseable
         @Override
         public void getOrder(final GetOrderRequest request, final StreamObserver<OrderState> obs)
         {
-            if (!authorised(core.firms().byId(request.getFirmId()), obs))
+            if (!authorised(request.getFirmId(), 0, obs))
             {
                 return;
             }
@@ -212,7 +238,8 @@ public final class GrpcFrontEnd implements AutoCloseable
                 {
                     b.addSymbols(SymbolInfo.newBuilder().setSymbolId(s.symbol().symbolId()).setTicker(s.symbol().ticker())
                         .setShardId(s.symbol().shard()).setTickSizeCents(s.symbol().tickSize())
-                        .setLotSize(s.symbol().lotSize()).setState(s.state()));
+                        .setLotSize(s.symbol().lotSize()).setState(s.state())
+                        .setReferencePriceCents(s.symbol().referencePrice()));
                 }
                 obs.onNext(b.build());
                 obs.onCompleted();
@@ -222,7 +249,9 @@ public final class GrpcFrontEnd implements AutoCloseable
         @Override
         public void getSessionStatus(final SessionStatusRequest request, final StreamObserver<SessionStatus> obs)
         {
-            if (!authorised(core.firmOfSession(request.getSessionId()), obs))
+            final AccessDirectory directory = core.access().current();
+            final AccessDirectory.SessionEntry session = directory == null ? null : directory.session(request.getSessionId());
+            if (!authorised(session == null ? -1 : session.firmId(), request.getSessionId(), obs))
             {
                 return;
             }

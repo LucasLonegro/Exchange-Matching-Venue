@@ -49,6 +49,11 @@ def build(site, region_key):
     g = site["gateways"]
     lines += ["", "# ---- gateways, market data, NBBO: in the leaders' zone ----", f"lmb.gateways={g}"]
     lines += [f"lmb.gateway.{i}.host=gw-{lz}-{i + 1:02d}.{dom}" for i in range(g)]
+    lines += ["# Internet-facing: gRPC TLS in process; FIX TLS by Envoy on the host (lmb-fix-tls.service) on fixPort,",
+              "# Artio on loopback behind it. Credentials from the access service (token: LMB_GATEWAY_ACCESS_TOKEN)",
+              "lmb.gateway.tls.certChain=/etc/lmb/tls/gateway.crt", "lmb.gateway.tls.privateKey=/etc/lmb/tls/gateway.key",
+              "lmb.gateway.fix.bindHost=127.0.0.1", "lmb.gateway.fix.listenPort=9201",
+              f"lmb.gateway.access.url=http://access.{dom}:9760", f"lmb.posttrade.access.url=http://access.{dom}:9760"]
     lines += ["lmb.md.instances=2", f"lmb.md.0.host=md-{lz}-a.{dom}", f"lmb.md.1.host=md-{lz}-b.{dom}"]
     lines += ["# no feed simulator in production (replaced by the ticker plant adapter); monitoring key only",
               "lmb.feedsim.instances=0"]
@@ -57,13 +62,22 @@ def build(site, region_key):
     lines += [f"lmb.controlplane.{i}.host=cp-{zones[i]}-01.{dom}" for i in range(2)]
     lines += ["# lmb.posttrade.instances / .<i>.host are not Topology keys yet (contract change request 2)",
               "lmb.posttrade.instances=2"] + [f"lmb.posttrade.{i}.host=pt-{zones[i]}-01.{dom}" for i in range(2)]
+    lines += ["# ---- access service (teams, keys, tiers): one per zone over the same database; access.<domain> is",
+              "# a DNS name (or VIP) over both. Operators' API on loopback (ssh), tokens: /etc/lmb/access.env ----",
+              "lmb.access.instances=2"]
+    for i in range(2):
+        lines += [f"lmb.access.{i}.host=access-{zones[i]}-01.{dom}", f"lmb.access.{i}.adminPort=9750",
+                  f"lmb.access.{i}.internalPort=9760", f"lmb.access.{i}.metricsPort=9770"]
+    lines += ["lmb.access.operatorsFile=/etc/lmb/operators/access", "lmb.access.allowDefaultTokens=false",
+              "lmb.controlplane.operatorsFile=/etc/lmb/operators/controlplane", "lmb.controlplane.allowDefaultTokens=false"]
     lines += ["# exactly one ledger (the only writer of its tables); lmb.ledger.instances / .0.host are monitoring keys",
               "lmb.ledger.instances=1", f"lmb.ledger.0.host=ledger-{zones[0]}-01.{dom}"]
     lines += ["", f"# ---- shadow replayers (one per shard) in {zones[-1]}; not Topology keys (monitoring only) ----"]
     lines += [f"lmb.replayer.{s}.host=rp-{zones[-1]}-{s // 8 + 1:02d}.{dom}" for s in range(shards)]
     lines += [f"lmb.replayer.{s}.metricsPort={9900 + s}" for s in range(shards)]
-    lines += ["", "# ---- reference data (rendered by the control plane from PostgreSQL at start of day) ----",
-              "lmb.symbols=/etc/lmb/refdata/symbols.csv", "lmb.firms=/etc/lmb/refdata/firms.csv"]
+    lines += ["", "# ---- reference data: symbols and firms live in the control plane's database (operator API). Gateways,",
+              "# post-trade and consolidators read GET /internal/v1/symbols on both instances (token: LMB_SYMBOLS_TOKEN;",
+              "# the control plane's own: LMB_CONTROLPLANE_SERVICETOKEN) ----"]
     if region_key == "primary":
         dr = site["dr"]
         lines += ["", f"# ---- DR: ClusterBackup per shard in {dr['name']} (async; RPO = backup lag) ----",
